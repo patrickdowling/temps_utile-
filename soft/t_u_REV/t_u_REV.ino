@@ -74,21 +74,12 @@ void FASTRUN CORE_timer_ISR() {
   TU::OUTPUTS::Update();
   display::Update();
 
-  // The ADC scan uses async startSingleRead/readSingle and single channel each
-  // loop, so should be fast enough even at 60us (check ADC::busy_waits() == 0)
-  // to verify. Effectively, the scan rate is ISR / 4 / ADC::kAdcSmoothing
-  // 100us: 10kHz / 4 / 4 ~ .6kHz
-  // 60us: 16.666K / 4 / 4 ~ 1kHz
-  // kAdcSmoothing == 4 has some (maybe 1-2LSB) jitter but seems "Good Enough".
-  TU::ADC::Scan_DMA();
+  // ADC runs in background using DMA. New values are loaded if transfer has completed
+  // and DMA will be restarted.
+  TU::ADC::Update();
   // Pin changes are tracked in separate ISRs, so depending on prio it might
   // need extra precautions.
   TU::DigitalInputs::Scan();
-
-#ifndef TU_UI_SEPARATE_ISR
-  TODO needs a counter
-  UI_timer_ISR();
-#endif
 
   ++TU::CORE::ticks;
   if (TU::CORE::app_isr_enabled)
@@ -100,7 +91,10 @@ void FASTRUN CORE_timer_ISR() {
 /*       ---------------------------------------------------------         */
 
 void setup() {
- 
+#ifdef TU_SERIAL_WAIT
+  while (!Serial) { }
+#endif
+
   delay(50);
   NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
   TU::OUTPUTS::SPI_Init();
@@ -114,7 +108,6 @@ void setup() {
   delay(300);
   TU::DigitalInputs::Init();
   TU::ADC::Init(&TU::calibration_data.adc); // Yes, it's using the calibration_data before it's loaded...
-  TU::ADC::Init_DMA();
   TU::OUTPUTS::Init(&TU::calibration_data.dac);
    
   display::Init();
@@ -133,11 +126,9 @@ void setup() {
   CORE_timer.begin(CORE_timer_ISR, TU_CORE_TIMER_RATE);
   CORE_timer.priority(TU_CORE_TIMER_PRIO);
 
-#ifdef TU_UI_SEPARATE_ISR
   SERIAL_PRINTLN("* Starting UI ISR @%luus", TU_UI_TIMER_RATE);
   UI_timer.begin(UI_timer_ISR, TU_UI_TIMER_RATE);
   UI_timer.priority(TU_UI_TIMER_PRIO);
-#endif
 
   // Display splash screen and optional calibration
   bool reset_settings = false;

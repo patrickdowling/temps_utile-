@@ -49,11 +49,12 @@ static constexpr size_t kMaxTriggerDelayTicks = 96;
 #define EEPROM_APPDATA_END EEPROMStorage::LENGTH
 
 #define TU_UI_DEBUG
-#define TU_UI_SEPARATE_ISR
 
 #define TU_ENCODERS_ENABLE_ACCELERATION_DEFAULT true
 
 #define TU_CALIBRATION_DEFAULT_FLAGS (0)
 //#define TU_CALIBRATION_DEFAULT_FLAGS (CALIBRATION_FLAG_ENCODERS_REVERSED)
 
-#endif  // TU_CONFIG_H_
+// #define TU_SERIAL_WAIT // if enable, wait for serial monitor at startup (not recommended for release)
+
+#endif // TU_CONFIG_H_

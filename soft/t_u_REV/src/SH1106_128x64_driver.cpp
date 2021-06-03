@@ -28,11 +28,12 @@
 #include <Arduino.h>
 #include "SH1106_128x64_driver.h"
 #include "../TU_gpio.h"
+#include "util_misc.h"
 
 #define DMA_PAGE_TRANSFER
 #ifdef DMA_PAGE_TRANSFER
 #include <DMAChannel.h>
-static DMAChannel page_dma;
+static DMAChannel page_dma{false};
 static bool page_dma_active = false;
 #endif
 #ifndef SPI_SR_RXCTR
@@ -105,6 +106,8 @@ void SH1106_128x64_Driver::Init() {
   digitalWriteFast(OLED_CS, OLED_CS_INACTIVE); // U8G_ESC_CS(0),             /* disable chip */
 
 #ifdef DMA_PAGE_TRANSFER
+  page_dma.begin();
+  SERIAL_PRINTLN("page_dma.channel=%x", page_dma.channel);
   page_dma.destination((volatile uint8_t&)SPI0_PUSHR);
   page_dma.transferSize(1);
   page_dma.transferCount(kPageSize);
