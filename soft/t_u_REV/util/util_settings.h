@@ -50,8 +50,8 @@ struct value_attr {
   // saved if parent_index > 0 and parent_value == get_value(parent_index - 1)
   // Obviously the parent has to live earlier in the settings list than the
   // dependent variable...
-  int parent_index;
-  int parent_value;
+  int parent_index = 0;
+  int parent_value = 0;
 
   int default_value() const {
     return default_;

@@ -36,12 +36,12 @@ typedef const uint8_t *font_glyph;
 class Graphics {
 public:
 
-  static const uint8_t kWidth = 128;
-  static const uint8_t kHeight = 64;
-  static const size_t kFrameSize = kWidth * kHeight / 8;
+  static constexpr uint8_t kWidth = 128;
+  static constexpr uint8_t kHeight = 64;
+  static constexpr size_t kFrameSize = kWidth * kHeight / 8;
 
-  static const weegfx::coord_t kFixedFontW = 6;
-  static const weegfx::coord_t kFixedFontH = 8;
+  static constexpr weegfx::coord_t kFixedFontW = 6;
+  static constexpr weegfx::coord_t kFixedFontH = 8;
 
   void Init();
 
@@ -64,6 +64,7 @@ public:
   void drawHLine(coord_t x, coord_t y, coord_t w);
   void drawVLine(coord_t x, coord_t y, coord_t h);
   void drawVLinePattern(coord_t x, coord_t y, coord_t h, uint8_t pattern);
+  void drawHLinePattern(coord_t x, coord_t y, coord_t w, uint8_t skip);
 
   void drawLine(coord_t x1, coord_t y1, coord_t x2, coord_t y2);
 

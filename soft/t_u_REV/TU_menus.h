@@ -217,7 +217,9 @@ public:
     graphics.setPrintPos(start_x + kColumnWidth * column + kTextX, kTextY);
   }
 
-  inline static void Draw() {
+  inline static void Draw(bool clear = false) {
+    if (clear)
+      graphics.clearRect(start_x, 0, kDisplayWidth - start_x, menu::kMenuLineH);
     graphics.drawHLine(start_x, kMenuLineH, kDisplayWidth - start_x);
     SetColumn(0);
   }

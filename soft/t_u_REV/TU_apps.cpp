@@ -22,6 +22,7 @@
 #include <Arduino.h>
 #include "TU_apps.h"
 #include "APP_CLK.h"
+#include "APP_SCOPE.h"
 
 #include "TU_patterns.h"
 #include "TU_global_config.h"
@@ -34,6 +35,7 @@
 
 static constexpr TU::App available_apps[] = {
   INSTANTIATE_APP("CL", 0x0102, "6xclocks", CLOCKS),
+  INSTANTIATE_APP("SC", 0x0100, "silloscope", SCOPE),
 };
 
 static constexpr int NUM_AVAILABLE_APPS = ARRAY_SIZE(available_apps);

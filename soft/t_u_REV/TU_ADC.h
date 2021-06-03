@@ -63,6 +63,10 @@ public:
     return raw_[channel] >> kAdcValueShift;
   }
 
+  static int32_t raw_offset_value(ADC_CHANNEL channel) {
+    return calibration_data_->offset[channel] - raw_value(channel);
+  }
+
   static uint32_t smoothed_raw_value(ADC_CHANNEL channel) {
     return smoothed_[channel] >> kAdcValueShift;
   }

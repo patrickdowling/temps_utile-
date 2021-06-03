@@ -8,10 +8,10 @@
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-// 
+//
 // The above copyright notice and this permission notice shall be included in
 // all copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -19,14 +19,16 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
-// 
+//
 // See http://creativecommons.org/licenses/MIT/ for more information.
 //
 
-#include <Arduino.h>
 #include "TU_app_menu.h"
-#include "TU_ui.h"
+
+#include <Arduino.h>
+
 #include "TU_apps.h"
+#include "TU_ui.h"
 
 static constexpr uint32_t kBlinkTicks = 200;
 
@@ -120,8 +122,7 @@ void AppMenu::DrawAppsPage() const
   item.y = menu::CalcLineY(0);
 
   auto &cursor = pages_[APPS_PAGE].cursor;
-  for (int current = cursor.first_visible();
-       current <= cursor.last_visible();
+  for (int current = cursor.first_visible(); current <= cursor.last_visible();
        ++current, item.y += menu::kMenuLineH) {
     auto app_desc = app_switcher.app_desc(current);
 
@@ -132,10 +133,10 @@ void AppMenu::DrawAppsPage() const
     }
 
     item.SetPrintPos();
-    graphics.movePrintPos(weegfx::Graphics::kFixedFontW, 0);  
+    graphics.movePrintPos(weegfx::Graphics::kFixedFontW, 0);
     graphics.print(app_desc->name);
     if (app_switcher.current_app_id() == app_desc->id)
-       graphics.drawBitmap8(item.x + 2, item.y + 1, 4, bitmap_indicator_4x8);
+      graphics.drawBitmap8(item.x + 2, item.y + 1, 4, bitmap_indicator_4x8);
     item.DrawCustom();
   }
 }
@@ -149,12 +150,10 @@ void AppMenu::DrawSlotsPage(PAGE page) const
   int last_slot_index = app_switcher.last_slot_index();
 
   auto &cursor = pages_[page].cursor;
-  for (int current = cursor.first_visible();
-       current <= cursor.last_visible();
+  for (int current = cursor.first_visible(); current <= cursor.last_visible();
        ++current, item.y += menu::kMenuLineH) {
-
     auto &slot_info = app_storage[current];
-    //auto app = app_switcher.find(slot_info.id);
+    auto app = app_switcher.find(slot_info.id);
 
     if (current == cursor.cursor_pos()) {
       if (LOAD_PAGE == page && !slot_info.loadable())
@@ -176,8 +175,7 @@ void AppMenu::DrawSlotsPage(PAGE page) const
 
     if (!debug_display_) {
       if (SLOT_STATE::EMPTY != slot_info.state)
-      // for the time being ...
-        graphics.printf("PRESET   >      #%d", current + 0x1); //graphics.printf(app ? app->name : "???? (%02x)", app->id);
+        graphics.printf("%-18s#%d", app ? app->name : "PRESET", current + 1);
       else
         graphics.print("(empty)");
     } else {
@@ -198,7 +196,7 @@ void AppMenu::DrawConfPage() const
   while (settings_list.available()) {
     const int setting = enabled_setting_at(settings_list.Next(list_item));
     list_item.DrawDefault(global_config.get_value(setting), global_config.value_attr(setting));
-  } 
+  }
 }
 
 AppMenu::Action AppMenu::HandleEvent(const UI::Event &event)
@@ -218,43 +216,44 @@ AppMenu::Action AppMenu::HandleEvent(const UI::Event &event)
       int page = current_page_ + event.value;
       CONSTRAIN(page, 0, PAGE_LAST - 1);
       current_page_ = static_cast<PAGE>(page);
-      current_page_cursor.Scroll(-app_storage.num_slots()); // cursor is a bit erratic, so jump back to line 0
+      current_page_cursor.Scroll(
+          -app_storage.num_slots());  // cursor is a bit erratic, so jump back to line 0
     } else if (CONTROL_ENCODER_R == event.control) {
       if (CONF_PAGE == current_page_ && current_page_cursor.editing()) {
         GLOBAL_CONFIG_SETTING setting = enabled_setting_at(current_page_cursor.cursor_pos());
-        if (global_config.change_value(setting, event.value))
-          global_config.Apply();
+        if (global_config.change_value(setting, event.value)) global_config.Apply();
       } else {
         current_page_cursor.Scroll(event.value);
       }
     }
   } else {
-    if (CONTROL_BUTTON_DOWN == event.control)
-      return { current_page_, ACTION_EXIT, 0 };
- 
+    if (CONTROL_BUTTON_DOWN == event.control) return {current_page_, ACTION_EXIT, 0};
+
     if (CONTROL_BUTTON_R == event.control) {
       if (UI::EVENT_BUTTON_LONG_PRESS == event.type) {
         if (!action_aborted_) {
-          switch(current_page_) {
-          case LOAD_PAGE: return { current_page_, ACTION_LOAD, current_page_cursor.cursor_pos() };
-          case SAVE_PAGE: return { current_page_, ACTION_SAVE, current_page_cursor.cursor_pos() };
-          case APPS_PAGE: return { current_page_, ACTION_INIT, current_page_cursor.cursor_pos() };
-          default: break;
+          switch (current_page_) {
+            case LOAD_PAGE: return {current_page_, ACTION_LOAD, current_page_cursor.cursor_pos()};
+            case SAVE_PAGE: return {current_page_, ACTION_SAVE, current_page_cursor.cursor_pos()};
+            case APPS_PAGE: return {current_page_, ACTION_INIT, current_page_cursor.cursor_pos()};
+            default: break;
           }
         }
         action_aborted_ = false;
       } else {
         switch (current_page_) {
-        case LOAD_PAGE:
-        case SAVE_PAGE: break; // debug_display_ = !debug_display_; break;
-        case APPS_PAGE: return { current_page_, ACTION_SWITCH, current_page_cursor.cursor_pos() }; break;
-        case CONF_PAGE: current_page_cursor.toggle_editing(); break;
-        default: break;
+          case LOAD_PAGE:
+          case SAVE_PAGE: break;  // debug_display_ = !debug_display_; break;
+          case APPS_PAGE:
+            return {current_page_, ACTION_SWITCH, current_page_cursor.cursor_pos()};
+            break;
+          case CONF_PAGE: current_page_cursor.toggle_editing(); break;
+          default: break;
         }
       }
     }
   }
-  return { current_page_, ACTION_NONE, 0 };
+  return {current_page_, ACTION_NONE, 0};
 }
 
 void AppMenu::update_enabled_settings()
@@ -265,4 +264,4 @@ void AppMenu::update_enabled_settings()
   num_enabled_settings_ = settings - enabled_settings_;
 }
 
-};
+};  // namespace TU

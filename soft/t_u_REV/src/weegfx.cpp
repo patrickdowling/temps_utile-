@@ -263,6 +263,20 @@ void Graphics::drawVLinePattern(coord_t x, coord_t y, coord_t h, uint8_t pattern
   }
 }
 
+void Graphics::drawHLinePattern(coord_t x, coord_t y, coord_t w, uint8_t skip)
+{
+  uint8_t h = 1;
+  CLIPX(x, w);
+  CLIPY(y, h);
+
+  uint8_t *buf = get_frame_ptr(x, y);
+  auto end = buf + w;
+  uint8_t mask = 0x1 << (y & 0x7);
+  while (buf < end) {
+    *buf |= mask;
+    buf += skip;
+  }
+}
 
 void Graphics::drawBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data) {
 

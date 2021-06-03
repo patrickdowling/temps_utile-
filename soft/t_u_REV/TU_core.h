@@ -2,6 +2,7 @@
 #define TU_CORE_H_
 
 #include <stdint.h>
+#include <cstring>
 #include "TU_config.h"
 #include "util/util_debugpins.h"
 #include "src/display.h"
