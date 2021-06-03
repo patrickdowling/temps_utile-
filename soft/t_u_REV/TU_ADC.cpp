@@ -12,7 +12,11 @@ namespace TU {
 /*static*/ ADC::CalibrationData* ADC::calibration_data_;
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_LAST];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_LAST];
-/*static*/ volatile bool ADC::ready_;
+
+// #define TU_ADC_ENABLE_DMA_INTERRUPT
+#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
+static volatile bool dma0_complete = false;
+#endif
 
 constexpr uint16_t ADC::SCA_CHANNEL_ID[DMA_NUM_CH];  // ADCx_SCA register channel numbers
 static DMAChannel dma0{false};                       // dma0 channel, fills adcbuffer_0
@@ -37,13 +41,15 @@ adcbuffer_0[DMA_BUF_SIZE];
   InitDMA();
 }
 
-/*static*/ void ADC::DMA_ISR()
+#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
+static void DMA_ISR()
 {
-  ADC::ready_ = true;
+  dma0_complete = true;
   dma0.TCD->DADDR = &adcbuffer_0[0];
   dma0.clearInterrupt();
   /* restart DMA in ADC::ScanDMA() */
 }
+#endif
 
 /*
  *
@@ -70,14 +76,16 @@ void ADC::InitDMA()
   dma0.TCD->CITER = DMA_BUF_SIZE;
   dma0.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
   dma0.disableOnCompletion();
+#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
   dma0.interruptAtCompletion();
   dma0.attachInterrupt(DMA_ISR);
+#endif
 
   dma1.begin(true);  // allocate the DMA channel
   dma1.TCD->SADDR = &ADC::SCA_CHANNEL_ID[0];
   dma1.TCD->SOFF = 2;  // source increment each transfer (n bytes)
   dma1.TCD->ATTR = 0x101;
-  dma1.TCD->SLAST = -DMA_NUM_CH * 2;  // num ADC0 samples * 2
+  dma1.TCD->SLAST = -(DMA_NUM_CH * 2);  // num ADC0 samples * 2
   dma1.TCD->BITER = DMA_NUM_CH;
   dma1.TCD->CITER = DMA_NUM_CH;
   dma1.TCD->DADDR = &ADC0_SC1A;
@@ -96,8 +104,13 @@ void ADC::InitDMA()
 
 /*static*/ void FASTRUN ADC::Update()
 {
-  if (ADC::ready_) {
-    ADC::ready_ = false;
+#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
+  if (dma0_complete) {
+    dma0_complete = false;
+#else
+  if (dma0.complete()) {
+    dma0.clearComplete();
+#endif
 
     /*
      * collect  results from adcbuffer_0; as things are, there's DMA_BUF_SIZE = 16 samples in the
@@ -120,7 +133,7 @@ void ADC::InitDMA()
     /* restart */
     dma0.enable();
   }
-}
+}  // namespace TU
 
 /*static*/ void ADC::CalibratePitch(int32_t c2, int32_t c4)
 {

@@ -43,8 +43,6 @@ public:
   };
 
   static void Init(CalibrationData *calibration_data);
-  static void InitDMA();
-  static void DMA_ISR();
   static void Update();
 
   template <ADC_CHANNEL channel>
@@ -95,7 +93,6 @@ private:
   }
 
   static ::ADC adc_;
-  static volatile bool ready_;
   static CalibrationData *calibration_data_;
 
   static uint32_t raw_[ADC_CHANNEL_LAST];
@@ -107,6 +104,8 @@ private:
    *   for some reason the IDs must be in order: CV2, CV3, CV4, CV1
    */
   static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = {0x46, 0x4C, 0x4D, 0x49};
+
+  static void InitDMA();
 };
 
 }  // namespace TU
