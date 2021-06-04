@@ -6,6 +6,15 @@
 #include "TU_gpio.h"
 #include "src/util_misc.h"
 
+/*
+ * NOTES
+ * There are two ADCs, but we might not be able to usefully map pins; it seems like only A2/A3
+ * are ADC0/1 capable, so CV1 only. This would also require 2x2 DMA streams to handle the muxing.
+ *
+ * - DMASetting/replaceSettingsOnCompletion to provide double buffering
+ * - There's a half-transfer interrupt, but no equivalent to DMA_TCD_CSR_DONE?
+ */
+
 namespace TU {
 
 struct ADC::Config {
@@ -33,8 +42,18 @@ static constexpr ADC::Config kDefaultConfig = {
 static volatile bool dma0_complete = false;
 #endif
 
-constexpr uint16_t ADC::SCA_CHANNEL_ID[DMA_NUM_CH];  // ADCx_SCA register channel numbers
-static DMAChannel dma0{false};                       // dma0 channel, fills adcbuffer_0
+/*
+ * below: channel ids for the ADCx_SCA register: we have 4 inputs
+ * CV1 (17) = A3 = 0x49; CV2 (20) = A6 = 0x46; CV3 (19) = A5 = 0x4C; CV4 (18) = A4 = 0x4D
+ * for some reason the IDs must be in order: CV2, CV3, CV4, CV1
+ *
+ * -> This reason is probably because when dma0 is enabled, the ADC is "ready" and triggers the
+ * first transfer. We migth be able to fix this by starting with SCA_CHANNEL_ID[1] and using
+ * circular buffer mode.
+ */
+static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = {0x46, 0x4C, 0x4D, 0x49};
+
+static DMAChannel dma0{false};  // dma0 channel, fills adcbuffer_0
 static DMAChannel dma1{false};  // dma1 channel, updates ADC0_SC1A which holds the channel/pin IDs
 DMAMEM static volatile uint16_t adcbuffer_0[DMA_BUF_SIZE]
     __attribute__((aligned(DMA_BUF_SIZE + 0)));
@@ -80,7 +99,6 @@ static void DMA_ISR()
  * https://www.nxp.com/docs/en/application-note/AN4590.pdf but w/o the PDB.
  *
  */
-
 void ADC::InitDMA()
 {
   dma0.begin(true);  // allocate the DMA channel
@@ -102,7 +120,7 @@ void ADC::InitDMA()
 #endif
 
   dma1.begin(true);  // allocate the DMA channel
-  dma1.TCD->SADDR = &ADC::SCA_CHANNEL_ID[0];
+  dma1.TCD->SADDR = &SCA_CHANNEL_ID[0];
   dma1.TCD->SOFF = 2;  // source increment each transfer (n bytes)
   dma1.TCD->ATTR = 0x101;
   dma1.TCD->SLAST = -(DMA_NUM_CH * 2);  // num ADC0 samples * 2

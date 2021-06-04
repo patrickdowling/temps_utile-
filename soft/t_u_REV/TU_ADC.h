@@ -29,7 +29,7 @@ public:
   static constexpr uint32_t kAdcSmoothBits = 8;  // fractional bits for smoothing
 
   struct Config;
-  static constexpr uint8_t kAdcScanResolution = 16; // normal mode
+  static constexpr uint8_t kAdcScanResolution = 16;  // normal mode
 
   struct CalibrationData {
     uint16_t offset[ADC_CHANNEL_LAST];
@@ -92,13 +92,6 @@ private:
 
   static uint32_t raw_[ADC_CHANNEL_LAST];
   static uint32_t smoothed_[ADC_CHANNEL_LAST];
-
-  /*
-   *   below: channel ids for the ADCx_SCA register: we have 4 inputs
-   *   CV1 (17) = A3 = 0x49; CV2 (20) = A6 = 0x46; CV3 (19) = A5 = 0x4C; CV4 (18) = A4 = 0x4D
-   *   for some reason the IDs must be in order: CV2, CV3, CV4, CV1
-   */
-  static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = {0x46, 0x4C, 0x4D, 0x49};
 
   static void Configure(const Config &config);
   static void InitDMA();
