@@ -28,13 +28,8 @@ public:
   static constexpr uint32_t kAdcSmoothing = 4;
   static constexpr uint32_t kAdcSmoothBits = 8;  // fractional bits for smoothing
 
-  // These values should be tweaked so startSingleRead/readSingle run in main ISR update time
-  // 16 bit has best-case 13 bits useable, but we only want 12 so we discard 4 anyway
-  static constexpr uint8_t kAdcScanResolution = 16;
-  static constexpr uint8_t kAdcScanAverages = 4;
-  static constexpr uint8_t kAdcSamplingSpeed = ADC_HIGH_SPEED_16BITS;
-  static constexpr uint8_t kAdcConversionSpeed = ADC_HIGH_SPEED;
-  static constexpr uint32_t kAdcValueShift = kAdcSmoothBits;
+  struct Config;
+  static constexpr uint8_t kAdcScanResolution = 16; // normal mode
 
   struct CalibrationData {
     uint16_t offset[ADC_CHANNEL_LAST];
@@ -48,15 +43,15 @@ public:
   template <ADC_CHANNEL channel>
   static int32_t value()
   {
-    return calibration_data_->offset[channel] - (smoothed_[channel] >> kAdcValueShift);
+    return calibration_data_->offset[channel] - (smoothed_[channel] >> kAdcSmoothBits);
   }
 
   static int32_t value(ADC_CHANNEL channel)
   {
-    return calibration_data_->offset[channel] - (smoothed_[channel] >> kAdcValueShift);
+    return calibration_data_->offset[channel] - (smoothed_[channel] >> kAdcSmoothBits);
   }
 
-  static uint32_t raw_value(ADC_CHANNEL channel) { return raw_[channel] >> kAdcValueShift; }
+  static uint32_t raw_value(ADC_CHANNEL channel) { return raw_[channel] >> kAdcSmoothBits; }
 
   static int32_t raw_offset_value(ADC_CHANNEL channel)
   {
@@ -65,7 +60,7 @@ public:
 
   static uint32_t smoothed_raw_value(ADC_CHANNEL channel)
   {
-    return smoothed_[channel] >> kAdcValueShift;
+    return smoothed_[channel] >> kAdcSmoothBits;
   }
 
   static int32_t pitch_value(ADC_CHANNEL channel)
@@ -105,6 +100,7 @@ private:
    */
   static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = {0x46, 0x4C, 0x4D, 0x49};
 
+  static void Configure(const Config &config);
   static void InitDMA();
 };
 

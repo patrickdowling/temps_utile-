@@ -8,6 +8,21 @@
 
 namespace TU {
 
+struct ADC::Config {
+  const uint8_t resolution;
+  const uint8_t averaging;
+  const uint8_t sampling_speed;
+  const uint8_t conversion_speed;
+};
+
+// 16 bit has best-case 13 bits useable, but we only want 12 so we discard 4 anyway
+static constexpr ADC::Config kDefaultConfig = {
+    .resolution = ADC::kAdcScanResolution,
+    .averaging = 4,
+    .sampling_speed = ADC_HIGH_SPEED_16BITS,
+    .conversion_speed = ADC_HIGH_SPEED,
+};
+
 /*static*/ ::ADC ADC::adc_;
 /*static*/ ADC::CalibrationData* ADC::calibration_data_;
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_LAST];
@@ -21,16 +36,13 @@ static volatile bool dma0_complete = false;
 constexpr uint16_t ADC::SCA_CHANNEL_ID[DMA_NUM_CH];  // ADCx_SCA register channel numbers
 static DMAChannel dma0{false};                       // dma0 channel, fills adcbuffer_0
 static DMAChannel dma1{false};  // dma1 channel, updates ADC0_SC1A which holds the channel/pin IDs
-DMAMEM static volatile uint16_t __attribute__((aligned(DMA_BUF_SIZE + 0)))
-adcbuffer_0[DMA_BUF_SIZE];
+DMAMEM static volatile uint16_t adcbuffer_0[DMA_BUF_SIZE]
+    __attribute__((aligned(DMA_BUF_SIZE + 0)));
 
 /*static*/ void ADC::Init(CalibrationData* calibration_data)
 {
   adc_.setReference(ADC_REF_3V3);
-  adc_.setResolution(kAdcScanResolution);
-  adc_.setConversionSpeed(kAdcConversionSpeed);
-  adc_.setSamplingSpeed(kAdcSamplingSpeed);
-  adc_.setAveraging(kAdcScanAverages);
+  Configure(kDefaultConfig);
 
   calibration_data_ = calibration_data;
   std::fill(raw_, raw_ + ADC_CHANNEL_LAST, 0);
@@ -39,6 +51,14 @@ adcbuffer_0[DMA_BUF_SIZE];
 
   adc_.enableDMA();
   InitDMA();
+}
+
+/*static*/ void ADC::Configure(const Config& config)
+{
+  adc_.setResolution(config.resolution);
+  adc_.setConversionSpeed(config.conversion_speed);
+  adc_.setSamplingSpeed(config.sampling_speed);
+  adc_.setAveraging(config.averaging);
 }
 
 #ifdef TU_ADC_ENABLE_DMA_INTERRUPT
