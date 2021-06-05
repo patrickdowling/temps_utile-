@@ -63,7 +63,7 @@ volatile bool TU::CORE::app_isr_enabled = false;
 volatile uint32_t TU::CORE::ticks = 0;
 
 void FASTRUN CORE_timer_ISR() {
-  DEBUG_PIN_SCOPE(DEBUG_PIN_2);
+  DEBUG_PIN_SCOPE(TU_GPIO_DEBUG_PIN2);
   TU_DEBUG_PROFILE_SCOPE(TU::DEBUG::ISR_cycles);
 
   // display uses SPI. By first updating the clock values, then starting

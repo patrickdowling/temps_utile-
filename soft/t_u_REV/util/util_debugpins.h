@@ -18,9 +18,7 @@ struct scoped_debug_pin {
 
 }; // namespace util
 
-//#define ENABLE_DEBUG_PINS
-
-#ifdef ENABLE_DEBUG_PINS
+#ifdef TU_ENABLE_DEBUG_PINS
 #define DEBUG_PIN_SCOPE(pin) \
   util::scoped_debug_pin<pin> debug_pin
 #else

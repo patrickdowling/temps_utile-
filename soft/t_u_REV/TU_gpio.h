@@ -57,8 +57,15 @@
 #define encL2 21
 #define butL  23
 
+// #define TU_ENABLE_DEBUG_PINS
+#ifdef TU_ENABLE_DEBUG_PINS
+#ifdef _TEMPS_UTILE_REV_0
+#error "Untested"
+#endif
+
 #define TU_GPIO_DEBUG_PIN1 30
 #define TU_GPIO_DEBUG_PIN2 29 // available on PCB
+#endif
 
 #define TU_GPIO_BUTTON_PINMODE INPUT_PULLUP
 #define TU_GPIO_TRx_PINMODE INPUT_PULLUP

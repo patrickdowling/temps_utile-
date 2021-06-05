@@ -24,10 +24,12 @@ namespace DEBUG {
 class DebugPins {
 public:
   static void Init() {
+#ifdef TU_ENABLE_DEBUG_PINS
     pinMode(TU_GPIO_DEBUG_PIN1, OUTPUT);
     pinMode(TU_GPIO_DEBUG_PIN2, OUTPUT);
     digitalWriteFast(TU_GPIO_DEBUG_PIN1, LOW);
     digitalWriteFast(TU_GPIO_DEBUG_PIN2, LOW);
+#endif
   }
 };
 
