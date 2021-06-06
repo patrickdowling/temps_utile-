@@ -23,45 +23,130 @@
 
 #include "APP_SCOPE.h"
 
+#include <algorithm>
+
 #include "TU_ADC.h"
+#include "TU_debug.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
 #include "util/util_settings.h"
 
-static int32_t data_buffer[128];
-static size_t data_buffer_index = 0;
+// NOTES
+// - SIMD processing of buffers?
 
 namespace scope {
 
+static constexpr weegfx::coord_t kDisplayBufferSize = weegfx::Graphics::kWidth;
+static constexpr size_t kAcquireBufferSize = 256;
+
+static int32_t acquire_buffer[kAcquireBufferSize];
+static size_t acquire_buffer_index = 0;
+
+static constexpr uint32_t kSettingTimeoutTicks = 5000;
+static constexpr uint32_t kMenuTimeoutTicks = 30000;
+
+class PopupElement {
+public:
+  bool visible() const { return visible_; }
+
+  void Tick(uint32_t ticks)
+  {
+    if (visible_) {
+      if (ticks - start_ticks_ > timeout_) visible_ = false;
+    }
+  }
+
+  void hide() { visible_ = false; };
+  void show()
+  {
+    visible_ = true;
+    start_ticks_ = TU::ui.ticks();
+  }
+
+  void poke() { start_ticks_ = TU::ui.ticks(); }
+
+  void set_timeout(uint32_t timeout) { timeout_ = timeout; }
+
+private:
+  bool visible_ = false;
+  uint32_t start_ticks_ = 0;
+  uint32_t timeout_ = kSettingTimeoutTicks;
+};
+
 enum ScopeChannelSettings {
   SCOPE_CHANNEL_SETTING_YDIV,
+  SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
   SCOPE_CHANNEL_SETTING_LAST,
 };
 
 class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
 public:
   void Init();
+  void Process(int32_t sample);
+
+  static const int32_t *ProcessBuffer(int32_t trigger_level, const int32_t *buffer, size_t length);
+
+  const int32_t *display_buffer() const { return display_buffer_; }
+
+  uint16_t trigger_count() const { return trigger_count_; }
 
 private:
+  int32_t display_buffer_[kDisplayBufferSize];
+  uint16_t trigger_count_{0};
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {1, 1, 2, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {32, 0, 32, "TRIGLVL", nullptr, settings::STORAGE_TYPE_I32},
 };
 
 void ScopeChannel::Init()
 {
   InitDefaults();
+  std::fill(std::begin(display_buffer_), std::end(display_buffer_), 0);
+}
+
+void ScopeChannel::Process(int32_t sample)
+{
+  acquire_buffer[acquire_buffer_index] = sample;
+  if (acquire_buffer_index < kAcquireBufferSize - 1) {
+    ++acquire_buffer_index;
+  } else {
+    auto trigger_sample =
+        ProcessBuffer(32, acquire_buffer, kAcquireBufferSize - kDisplayBufferSize);
+    if (trigger_sample) {
+      std::copy(trigger_sample, trigger_sample + kDisplayBufferSize, display_buffer_);
+      ++trigger_count_;
+    }
+    acquire_buffer_index = 0;
+  }
+}
+
+/*static*/ const int32_t *ScopeChannel::ProcessBuffer(int32_t trigger_level, const int32_t *buffer,
+                                                      size_t length)
+{
+  size_t len = length;
+  // Starting value is above trigger, find if/where it drops below
+  while (len && buffer[0] > trigger_level) {
+    ++buffer;
+    --len;
+  }
+
+  while (len--) {
+    if (buffer[0] > trigger_level) return buffer;
+    ++buffer;
+  }
+
+  return nullptr;
 }
 
 class ScopeApp {
 public:
-  static constexpr uint32_t kMenuTimeoutTicks = 5000;
-  static constexpr uint32_t kSettingTimeoutTicks = 2000;
   static constexpr int kNumChannels = 4;
 
   void Init();
+  void Process();
   void UpdateUI();
 
   size_t Save(util::StreamBufferWriter &stream_buffer) const;
@@ -69,7 +154,10 @@ public:
 
   void OnButton(const UI::Event &event);
   void OnEncoder(const UI::Event &event);
-  void RenderMenu() const;
+  void Render() const;
+  void RenderScreensaver() const;
+
+  void EventScreensaverOff();
 
   static void RenderGrid();
 
@@ -78,14 +166,16 @@ public:
 private:
   struct {
     bool menu_active = false;
-    uint32_t menu_active_ticks = 0;
-    bool ydiv_display = false;
-    uint32_t ydiv_active_ticks = 0;
+    PopupElement ydiv_display;
   } ui_;
 
   int current_channel_{0};
 
   ScopeChannel channels_[kNumChannels];
+
+  void RenderMenu() const;
+  void RenderScope() const;
+  void RenderScopeUI() const;
 };
 
 void ScopeApp::Init()
@@ -93,15 +183,16 @@ void ScopeApp::Init()
   for (auto &channel : channels_) channel.Init();
 }
 
+void ScopeApp::Process()
+{
+  auto sample = TU::ADC::raw_offset_value(current_adc_channel());
+  channels_[current_channel_].Process(sample);
+}
+
 void ScopeApp::UpdateUI()
 {
   auto ticks = TU::ui.ticks();
-  if (ui_.menu_active) {
-    if (ticks - ui_.menu_active_ticks > kMenuTimeoutTicks) ui_.menu_active = false;
-  }
-  if (ui_.ydiv_display) {
-    if (ticks - ui_.ydiv_active_ticks > kSettingTimeoutTicks) ui_.ydiv_display = false;
-  }
+  ui_.ydiv_display.Tick(ticks);
 }
 
 size_t ScopeApp::Save(util::StreamBufferWriter &stream_buffer) const
@@ -137,9 +228,8 @@ void ScopeApp::OnButton(const UI::Event &event)
 {
   if (UI::EVENT_BUTTON_PRESS == event.type) {
     switch (event.control) {
-      case TU::CONTROL_BUTTON_L: {
+      case TU::CONTROL_BUTTON_UP: {
         ui_.menu_active = !ui_.menu_active;
-        if (ui_.menu_active) ui_.menu_active_ticks = TU::ui.ticks();
       } break;
     }
   }
@@ -158,46 +248,83 @@ void ScopeApp::OnEncoder(const UI::Event &event)
   }
   if (TU::CONTROL_ENCODER_R == event.control) {
     current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
-    ui_.ydiv_display = true;
-    ui_.ydiv_active_ticks = TU::ui.ticks();
+    ui_.ydiv_display.show();
   }
+}
+
+void ScopeApp::Render() const
+{
+  if (ui_.menu_active) {
+    RenderMenu();
+  } else {
+    RenderGrid();
+    RenderScope();
+    RenderScopeUI();
+  }
+}
+
+void ScopeApp::RenderScreensaver() const
+{
+  RenderScope();
+}
+
+void ScopeApp::EventScreensaverOff()
+{
+  ui_.menu_active = false;
 }
 
 void ScopeApp::RenderMenu() const
 {
   namespace menu = TU::menu;
+  menu::QuadTitleBar::Draw(true);
+  for (int i = 0; i < 4; ++i) {
+    menu::QuadTitleBar::SetColumn(i);
+    graphics.print((char)('1' + i));
+  }
+  menu::QuadTitleBar::Selected(current_channel_);
+}
 
+void ScopeApp::RenderScope() const
+{
   auto &current_channel = channels_[current_channel_];
 
-  RenderGrid();
-
   auto ydiv = current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV);
-  for (weegfx::coord_t x = 0; x < 127; ++x) {
-    auto y1 = 32 - ((ydiv * data_buffer[x]) >> 6);
+  auto display_buffer = current_channel.display_buffer();
+  for (weegfx::coord_t x = 0; x < (kDisplayBufferSize - 1); ++x) {
+    auto y1 = 32 - ((ydiv * display_buffer[x]) >> 6);
     CONSTRAIN(y1, 0, 63);
-    auto y2 = 32 - ((ydiv * data_buffer[x + 1]) >> 6);
+    auto y2 = 32 - ((ydiv * display_buffer[x + 1]) >> 6);
     CONSTRAIN(y2, 0, 63);
 
     graphics.drawLine(x, y1, x + 1, y2);
   }
+}
 
-  if (ui_.menu_active) {
-    menu::QuadTitleBar::Draw(true);
-    for (int i = 0; i < 4; ++i) {
-      menu::QuadTitleBar::SetColumn(i);
-      graphics.print((char)('1' + i));
-    }
-    menu::QuadTitleBar::Selected(current_channel_);
-  } else {
-    graphics.setPrintPos(1, 1);
-    graphics.print((char)('1' + current_channel_));
-    graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
+void ScopeApp::RenderScopeUI() const
+{
+  namespace DEBUG = TU::DEBUG;
+  auto &current_channel = channels_[current_channel_];
 
-    if (ui_.ydiv_display) {
-      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 0);
-      graphics.printf("x%d", current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV));
-    }
+  graphics.setPrintPos(1, 1);
+  graphics.print((char)('1' + current_channel_));
+  graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
+
+  if (ui_.ydiv_display.visible()) {
+    graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 0);
+    graphics.printf("x%d", current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV));
   }
+
+  graphics.drawBitmap8(0,
+                       32 - (current_channel.get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL) >> 6) - 4,
+                       TU::kBitmapLoopMarkerW, TU::bitmap_loop_markers_8);
+
+  auto x = 128 - weegfx::Graphics::kFixedFontW * 5;
+
+  graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH);
+  graphics.print(current_channel.trigger_count(), 5);
+
+  graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH * 2);
+  graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
 }
 
 static ScopeApp scope_app_instance;
@@ -232,10 +359,10 @@ void SCOPE_reset()
 void SCOPE_handleAppEvent(TU::AppEvent event)
 {
   switch (event) {
-    case TU::APP_EVENT_RESUME:
-    case TU::APP_EVENT_SUSPEND:
-    case TU::APP_EVENT_SCREENSAVER_ON:
-    case TU::APP_EVENT_SCREENSAVER_OFF:
+    case TU::APP_EVENT_RESUME: break;
+    case TU::APP_EVENT_SUSPEND: break;
+    case TU::APP_EVENT_SCREENSAVER_ON: break;
+    case TU::APP_EVENT_SCREENSAVER_OFF: scope::scope_app_instance.EventScreensaverOff(); break;
     default: break;
   }
 }
@@ -247,10 +374,13 @@ void SCOPE_loop()
 
 void SCOPE_menu()
 {
-  scope::scope_app_instance.RenderMenu();
+  scope::scope_app_instance.Render();
 }
 
-void SCOPE_screensaver() {}
+void SCOPE_screensaver()
+{
+  scope::scope_app_instance.RenderScreensaver();
+}
 
 void SCOPE_handleButtonEvent(const UI::Event &event)
 {
@@ -264,8 +394,6 @@ void SCOPE_handleEncoderEvent(const UI::Event &event)
 
 void SCOPE_isr()
 {
-  data_buffer[data_buffer_index] =
-      TU::ADC::raw_offset_value(scope::scope_app_instance.current_adc_channel());
-  data_buffer_index = (data_buffer_index + 1) & 0x7f;
+  scope::scope_app_instance.Process();
 }
 
