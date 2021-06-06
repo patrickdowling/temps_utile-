@@ -103,6 +103,10 @@ size_t AppSwitcher::last_slot_index() const {
   return global_state.last_slot_index;
 }
 
+size_t AppSwitcher::current_app_index() const {
+  return index_of(current_app_->id);
+}
+
 void AppSwitcher::Init(bool reset_settings) {
 
   current_app_ = &available_apps[DEFAULT_APP_INDEX];

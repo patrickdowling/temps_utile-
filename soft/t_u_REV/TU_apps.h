@@ -116,6 +116,7 @@ public:
   uint16_t current_app_id() const;
 
   size_t last_slot_index() const;
+  size_t current_app_index() const;
 
   AppHandle current_app() const {
     return current_app_;

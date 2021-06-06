@@ -68,6 +68,7 @@ void AppMenu::Resume()
     first_ = false;
   }
 
+  pages_[APPS_PAGE].cursor.Scroll(app_switcher.current_app_index());
   pages_[CONF_PAGE].cursor.set_editing(false);
   debug_display_ = false;
   slot_armed_ = 0;
