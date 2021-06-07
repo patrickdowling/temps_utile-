@@ -17,28 +17,38 @@ enum ADC_CHANNEL {
   ADC_CHANNEL_LAST,
 };
 
-#define DMA_BUF_SIZE 16
-#define DMA_NUM_CH ADC_CHANNEL_LAST
-
 namespace TU {
 
 class ADC {
 public:
-  static constexpr uint8_t kAdcResolution = 12;
-  static constexpr uint32_t kAdcSmoothing = 4;
-  static constexpr uint32_t kAdcSmoothBits = 8;  // fractional bits for smoothing
-
-  struct Config;
-  static constexpr uint8_t kAdcScanResolution = 16;  // normal mode
-
   struct CalibrationData {
     uint16_t offset[ADC_CHANNEL_LAST];
     uint16_t pitch_cv_scale;
     int16_t pitch_cv_offset;
   };
 
+  struct Config;
+
+  // Base initialization in default/normal mode
   static void Init(CalibrationData *calibration_data);
+
+  // Start conversions in "original" mode, i.e. all four channels, averaging, etc.
+  static void StartConversionNormal();
+
+  // Start conversions in immediate mode (details TBD)
+  static void StartConversionImmediate();
+
+  // Periodic update function (expected to run in main ISR)
   static void Update();
+
+  // IMMEDIATE_MODE
+
+  // NORMAL_MODE
+  // These are the default settings for the original ADC use (as seen on o_C as well)
+  static constexpr uint8_t kAdcResolution = 12;
+  static constexpr uint32_t kAdcSmoothing = 4;
+  static constexpr uint32_t kAdcSmoothBits = 8;      // fractional bits for smoothing
+  static constexpr uint8_t kAdcScanResolution = 16;  // normal mode
 
   template <ADC_CHANNEL channel>
   static int32_t value()
@@ -74,8 +84,6 @@ public:
     return (value * calibration_data_->pitch_cv_scale) >> 12;
   }
 
-  static void CalibratePitch(int32_t c2, int32_t c4);
-
 private:
   template <ADC_CHANNEL channel>
   static void update(uint32_t value)
@@ -87,14 +95,25 @@ private:
     smoothed_[channel] = value;
   }
 
-  static ::ADC adc_;
+  enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_IMMEDIATE };
+
   static CalibrationData *calibration_data_;
+  static ADC_MODE mode_;
+  static ::ADC adc_;
 
   static uint32_t raw_[ADC_CHANNEL_LAST];
   static uint32_t smoothed_[ADC_CHANNEL_LAST];
 
   static void Configure(const Config &config);
-  static void InitDMA();
+
+  static void InitDMASettingsNormal();
+  static void InitDMASettingsImmediate();
+  static void StartDMA();
+  static void StopDMA();
+
+  // Deprecated?
+public:
+  static void CalibratePitch(int32_t c2, int32_t c4);
 };
 
 }  // namespace TU
