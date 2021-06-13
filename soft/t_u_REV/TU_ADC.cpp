@@ -45,6 +45,7 @@ static constexpr ADC::Config kConfigBuffered = {
     .sampling_speed = ADC_HIGH_SPEED,
     .conversion_speed = ADC_MED_SPEED,
 };
+// 12, 1, ADC_HIGH_SPEED_16BITS, ADC_HIGH_SPEED => ISR @ 3.7KHz x 128 = 474Khz
 // 12, 1, ADC_HIGH_SPEED, ADC_MED_SPEED => ISR @ 2.1KHz x 128 = 268Khz = 3.7us per sample
 
 /*static*/ ADC::CalibrationData* ADC::calibration_data_ = nullptr;

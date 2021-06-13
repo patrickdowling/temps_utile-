@@ -95,26 +95,39 @@ private:
   uint32_t timeout_ = kSettingTimeoutTicks;
 };
 
-template <size_t length>
-static const int16_t *ScanBufferForTrigger(int16_t trigger_level, const int16_t *buffer)
-{
-  size_t len = length;
-  // Starting value is above trigger, find if/where it drops below
-  while (len && buffer[0] > trigger_level) {
-    ++buffer;
-    --len;
-  }
+class TriggerProcessor {
+public:
+  enum TriggerType {
+    TRIGGER_TYPE_NONE,
+    TRIGGER_TYPE_RISING,
+    TRIGGER_TYPE_FALLING,
+    // TRIGGER_TYPE_EXT
+    TRIGGER_TYPE_LAST
+  };
 
-  while (len--) {
-    if (buffer[0] > trigger_level) return buffer;
-    ++buffer;
-  }
+  template <size_t length>
+  static const int16_t *ScanBuffer(int16_t trigger_level, const int16_t *buffer)
+  {
+    size_t len = length;
+    // Starting value is above trigger, find if/where it drops below
+    while (len && buffer[0] > trigger_level) {
+      ++buffer;
+      --len;
+    }
 
-  return nullptr;
-}
+    while (len--) {
+      if (buffer[0] > trigger_level) return buffer;
+      ++buffer;
+    }
+
+    return nullptr;
+  }
+};
 
 enum ScopeChannelSettings {
+  SCOPE_CHANNEL_SETTING_XDIV,
   SCOPE_CHANNEL_SETTING_YDIV,
+  SCOPE_CHANNEL_SETTING_TRIG_TYPE,
   SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
   SCOPE_CHANNEL_SETTING_LAST,
 };
@@ -122,11 +135,26 @@ enum ScopeChannelSettings {
 class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
 public:
   void Init();
-  void Process(ADC_CHANNEL adc_channel);
+  void Process(ADC_CHANNEL adc_channel, const uint16_t *adc_chunk);
 
   const int16_t *UpdateDisplayBuffer();
 
   uint32_t trigger_count() const { return trigger_count_; }
+
+  // settings wrappers
+
+  int xdiv() const { return get_value(SCOPE_CHANNEL_SETTING_XDIV); }
+  int ydiv() const { return get_value(SCOPE_CHANNEL_SETTING_YDIV); }
+
+  TriggerProcessor::TriggerType trigger_type() const
+  {
+    return static_cast<TriggerProcessor::TriggerType>(get_value(SCOPE_CHANNEL_SETTING_TRIG_TYPE));
+  }
+
+  int16_t trigger_level() const
+  {
+    return static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
+  }
 
 private:
   uint32_t trigger_count_{0};
@@ -140,7 +168,9 @@ private:
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {1, 1, 2, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
-    {32, 0, 32, "TRIGLVL", nullptr, settings::STORAGE_TYPE_I32},
+    {1, 1, 4, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {1, 1, 1, "TRIG TYPE", nullptr, settings::STORAGE_TYPE_U8},
+    {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
 };
 
 void ScopeChannel::Init()
@@ -150,32 +180,26 @@ void ScopeChannel::Init()
   display_buffers_.Init();
 }
 
-// TODO this needs a better place to live
-uint16_t raw_buffer[kADCChunkSize];
-
-void ScopeChannel::Process(ADC_CHANNEL adc_channel)
+void ScopeChannel::Process(ADC_CHANNEL adc_channel, const uint16_t *adc_chunk)
 {
-  if (TU::ADC::ReadChunk(raw_buffer)) {
-    // Offset raw samples
-    auto tail = sample_buffer_.tail_buffer();
-    for (auto src = raw_buffer; src < raw_buffer + kADCChunkSize; ++src)
-      *tail++ = TU::ADC::offset_value(adc_channel, *src);
+  // Offset raw samples
+  auto tail = sample_buffer_.tail_buffer();
+  for (auto src = adc_chunk; src < adc_chunk + kADCChunkSize; ++src)
+    *tail++ = TU::ADC::offset_value(adc_channel, *src);
 
-    sample_buffer_.advance();
-    auto head = sample_buffer_.head_buffer();
-    auto trigger =
-        ScanBufferForTrigger<kADCChunkSize>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL), head);
-    if (trigger) {
-      ++trigger_count_;
-      if (display_buffers_.writeable()) {
-        auto display_buffer = display_buffers_.writeable_frame();
+  sample_buffer_.advance();
+  auto head = sample_buffer_.head_buffer();
+  auto trigger = TriggerProcessor::ScanBuffer<kADCChunkSize>(trigger_level(), head);
+  if (trigger) {
+    ++trigger_count_;
+    if (display_buffers_.writeable()) {
+      auto display_buffer = display_buffers_.writeable_frame();
 
-        size_t n = trigger - head;
-        std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
-        display_buffer += kADCChunkSize - n;
-        std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
-        display_buffers_.written();
-      }
+      size_t n = trigger - head;
+      std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
+      display_buffer += kADCChunkSize - n;
+      std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
+      display_buffers_.written();
     }
   }
 }
@@ -209,22 +233,27 @@ public:
 
   static void RenderGrid();
 
-  ADC_CHANNEL current_adc_channel() const { return static_cast<ADC_CHANNEL>(current_channel_); }
-
 private:
   struct {
     bool menu_active = false;
+    bool edit_trigger_level = false;
+
     PopupElement ydiv_display;
   } ui_;
 
   int current_channel_{0};
+  static uint16_t adc_chunk_buffer_[kADCChunkSize];
 
   ScopeChannel channels_[kNumChannels];
+
+  ADC_CHANNEL current_adc_channel() const { return static_cast<ADC_CHANNEL>(current_channel_); }
 
   void RenderMenu() const;
   void RenderScope();  // const;
   void RenderScopeUI() const;
 };
+
+/*static*/ uint16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
 
 void ScopeApp::Init()
 {
@@ -233,7 +262,10 @@ void ScopeApp::Init()
 
 void ScopeApp::Process()
 {
-  channels_[current_channel_].Process(current_adc_channel());
+  if (TU::ADC::ReadChunk(adc_chunk_buffer_))
+    channels_[current_channel_].Process(current_adc_channel(), adc_chunk_buffer_);
+
+  // Other regular book-keeping?
 }
 
 void ScopeApp::UpdateUI()
@@ -278,6 +310,11 @@ void ScopeApp::OnButton(const UI::Event &event)
       case TU::CONTROL_BUTTON_UP: {
         ui_.menu_active = !ui_.menu_active;
       } break;
+      case TU::CONTROL_BUTTON_R: {
+        ui_.edit_trigger_level = !ui_.edit_trigger_level;
+        ui_.ydiv_display.show();
+      } break;
+      default: break;
     }
   }
 }
@@ -294,7 +331,11 @@ void ScopeApp::OnEncoder(const UI::Event &event)
     }
   }
   if (TU::CONTROL_ENCODER_R == event.control) {
-    current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+    if (ui_.edit_trigger_level) {
+      current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
+    } else {
+      current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+    }
     ui_.ydiv_display.show();
   }
 }
@@ -337,7 +378,7 @@ void ScopeApp::RenderScope()  // const
 
   auto display_buffer = current_channel.UpdateDisplayBuffer();
   if (display_buffer) {
-    auto ydiv = current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV);
+    auto ydiv = current_channel.ydiv();
     auto y1 = 32 - ((ydiv * display_buffer[0]) >> 6);
     CONSTRAIN(y1, 0, 63);
     for (weegfx::coord_t x = 0; x < kDisplayBufferSize - 1; ++x) {
@@ -360,13 +401,17 @@ void ScopeApp::RenderScopeUI() const
   graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
 
   if (ui_.ydiv_display.visible()) {
-    graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 0);
-    graphics.printf("x%d", current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV));
+    if (ui_.edit_trigger_level) {
+      graphics.setPrintPos(128 - 5 * weegfx::Graphics::kFixedFontW, 0);
+      graphics.pretty_print(current_channel.trigger_level(), 5);
+    } else {
+      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 0);
+      graphics.printf("x%d", current_channel.ydiv());
+    }
   }
 
-  graphics.drawBitmap8(0,
-                       32 - (current_channel.get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL) >> 6) - 4,
-                       TU::kBitmapLoopMarkerW, TU::bitmap_loop_markers_8);
+  graphics.drawBitmap8(0, 32 - (current_channel.trigger_level() >> 6) - 4, TU::kBitmapLoopMarkerW,
+                       TU::bitmap_loop_markers_8);
 
   auto x = 128 - weegfx::Graphics::kFixedFontW * 5;
 
