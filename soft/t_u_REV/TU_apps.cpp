@@ -183,13 +183,13 @@ void AppSwitcher::Init(bool reset_settings) {
 }
 
 void AppSwitcher::set_current_app(size_t index) {
-  current_app_ = &available_apps[index];
-  global_state.current_app_id = current_app_->id;
+  set_current_app(&available_apps[index]);
 }
 
 void AppSwitcher::set_current_app(AppHandle app) {
   current_app_ = app;
   global_state.current_app_id = current_app_->id;
+  current_app_->HandleAppEvent(APP_EVENT_ACTIVATE);
 }
 
 bool AppSwitcher::SaveCurrentAppToSlot(size_t slot_index)

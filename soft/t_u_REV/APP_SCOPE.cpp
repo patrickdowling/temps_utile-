@@ -363,6 +363,7 @@ void SCOPE_handleAppEvent(TU::AppEvent event)
     case TU::APP_EVENT_SUSPEND: break;
     case TU::APP_EVENT_SCREENSAVER_ON: break;
     case TU::APP_EVENT_SCREENSAVER_OFF: scope::scope_app_instance.EventScreensaverOff(); break;
+    case TU::APP_EVENT_ACTIVATE: TU::ADC::StartConversionBuffered(ADC_CHANNEL_1); break;
     default: break;
   }
 }

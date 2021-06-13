@@ -34,7 +34,8 @@ enum AppEvent {
   APP_EVENT_SUSPEND,
   APP_EVENT_RESUME,
   APP_EVENT_SCREENSAVER_ON,
-  APP_EVENT_SCREENSAVER_OFF
+  APP_EVENT_SCREENSAVER_OFF,
+  APP_EVENT_ACTIVATE
 };
 
 // This is a very poor-man's application "switching" framework, which has

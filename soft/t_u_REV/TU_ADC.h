@@ -127,7 +127,7 @@ private:
 
   static void InitDMASettingsNormal();
   static void InitDMASettingsBuffered();
-  static void StartDMA(DMASetting *dma_settings);
+  static void StartDMA(ADC_MODE mode, DMASetting *dma_settings);
   static void StopDMA();
 
   // Deprecated?

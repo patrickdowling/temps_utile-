@@ -39,6 +39,13 @@ static constexpr ADC::Config kConfigNormal = {
     .conversion_speed = ADC_HIGH_SPEED,
 };
 
+static constexpr ADC::Config kConfigBuffered = {
+    .resolution = 16,
+    .averaging = 1,
+    .sampling_speed = ADC_HIGH_SPEED_16BITS,
+    .conversion_speed = ADC_HIGH_SPEED,
+};
+
 /*static*/ ADC::CalibrationData* ADC::calibration_data_ = nullptr;
 /*static*/ ADC::ADC_MODE ADC::mode_ = ADC::ADC_MODE_INVALID;
 /*static*/ ::ADC ADC::adc_;
@@ -151,9 +158,7 @@ static void ADC_DMA_ISR()
     Configure(kConfigNormal);
 
     std::copy(SCA_CHANNEL_ID, SCA_CHANNEL_ID + ADC_CHANNEL_LAST, adc_mux_buffer);
-    StartDMA(dma_settings_normal);
-
-    mode_ = ADC_MODE_NORMAL;
+    StartDMA(ADC_MODE_NORMAL, dma_settings_normal);
   }
 }
 
@@ -190,12 +195,10 @@ static void ADC_DMA_ISR()
     SERIAL_PRINTLN("[ADC] StartConversionBuffered");
 
     StopDMA();
-    Configure(kConfigNormal);
+    Configure(kConfigBuffered);
 
     adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
-    StartDMA(dma_settings_buffered);
-
-    mode_ = ADC_MODE_BUFFERED;
+    StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
   }
 }
 
@@ -212,9 +215,10 @@ static void ADC_DMA_ISR()
   }
 }
 
-/*static*/ void ADC::StartDMA(DMASetting* dma_settings)
+/*static*/ void ADC::StartDMA(ADC_MODE mode, DMASetting* dma_settings)
 {
-  SERIAL_PRINTLN("[ADC] StartDMA");
+  mode_ = mode;
+  SERIAL_PRINTLN("[ADC] StartDMA (mode=%x)", mode_);
 
   dma_channel_mux = dma_settings[0];
   dma_channel_adc = dma_settings[1];
