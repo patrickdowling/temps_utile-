@@ -33,14 +33,36 @@
 
 // NOTES
 // - SIMD processing of buffers?
+// - Raw values from ADC are inverted, so we use calibration offset
 
 namespace scope {
 
 static constexpr weegfx::coord_t kDisplayBufferSize = weegfx::Graphics::kWidth;
-static constexpr size_t kAcquireBufferSize = 256;
+static constexpr size_t kADCChunkSize = TU::ADC::kDMAChunkSize;
 
-static int32_t acquire_buffer[kAcquireBufferSize];
-static size_t acquire_buffer_index = 0;
+template <typename T, size_t chunk_size, size_t num_chunks>
+class CircularSampleBuffer {
+public:
+  static constexpr size_t kChunkSize = chunk_size;
+  static constexpr size_t kNumChunks = num_chunks;
+  static constexpr size_t kBufferSize = kChunkSize * kNumChunks;
+
+  void advance()
+  {
+    ++head_;
+    ++tail_;
+  }
+
+  const T *head_buffer() const { return buffer_ + (head_ % kNumChunks) * kChunkSize; }
+  const T *head_buffer(size_t i) const { return buffer_ + ((head_ + 1) % kNumChunks) * kChunkSize; }
+
+  T *tail_buffer() { return buffer_ + (tail_ % kNumChunks) * kChunkSize; }
+
+private:
+  T buffer_[kBufferSize];
+  size_t head_ = 0;
+  size_t tail_ = kNumChunks - 1;
+};
 
 static constexpr uint32_t kSettingTimeoutTicks = 5000;
 static constexpr uint32_t kMenuTimeoutTicks = 30000;
@@ -73,58 +95,8 @@ private:
   uint32_t timeout_ = kSettingTimeoutTicks;
 };
 
-enum ScopeChannelSettings {
-  SCOPE_CHANNEL_SETTING_YDIV,
-  SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
-  SCOPE_CHANNEL_SETTING_LAST,
-};
-
-class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
-public:
-  void Init();
-  void Process(int32_t sample);
-
-  static const int32_t *ProcessBuffer(int32_t trigger_level, const int32_t *buffer, size_t length);
-
-  const int32_t *display_buffer() const { return display_buffer_; }
-
-  uint16_t trigger_count() const { return trigger_count_; }
-
-private:
-  int32_t display_buffer_[kDisplayBufferSize];
-  uint16_t trigger_count_{0};
-};
-
-SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
-    // default, min, max, name, value_names, storage_type, parent_index, parent_value
-    {1, 1, 2, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
-    {32, 0, 32, "TRIGLVL", nullptr, settings::STORAGE_TYPE_I32},
-};
-
-void ScopeChannel::Init()
-{
-  InitDefaults();
-  std::fill(std::begin(display_buffer_), std::end(display_buffer_), 0);
-}
-
-void ScopeChannel::Process(int32_t sample)
-{
-  acquire_buffer[acquire_buffer_index] = sample;
-  if (acquire_buffer_index < kAcquireBufferSize - 1) {
-    ++acquire_buffer_index;
-  } else {
-    auto trigger_sample =
-        ProcessBuffer(32, acquire_buffer, kAcquireBufferSize - kDisplayBufferSize);
-    if (trigger_sample) {
-      std::copy(trigger_sample, trigger_sample + kDisplayBufferSize, display_buffer_);
-      ++trigger_count_;
-    }
-    acquire_buffer_index = 0;
-  }
-}
-
-/*static*/ const int32_t *ScopeChannel::ProcessBuffer(int32_t trigger_level, const int32_t *buffer,
-                                                      size_t length)
+template <size_t length>
+static const int16_t *ScanBufferForTrigger(int16_t trigger_level, const int16_t *buffer)
 {
   size_t len = length;
   // Starting value is above trigger, find if/where it drops below
@@ -141,6 +113,82 @@ void ScopeChannel::Process(int32_t sample)
   return nullptr;
 }
 
+enum ScopeChannelSettings {
+  SCOPE_CHANNEL_SETTING_YDIV,
+  SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
+  SCOPE_CHANNEL_SETTING_LAST,
+};
+
+class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
+public:
+  void Init();
+  void Process(ADC_CHANNEL adc_channel);
+
+  const int16_t *UpdateDisplayBuffer();
+
+  uint32_t trigger_count() const { return trigger_count_; }
+
+private:
+  uint32_t trigger_count_{0};
+
+  FrameBuffer<kDisplayBufferSize, 2, int16_t> display_buffers_;
+  const int16_t *current_display_buffer_ = nullptr;
+
+  CircularSampleBuffer<int16_t, kADCChunkSize, 3> sample_buffer_;
+};
+
+SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
+    // default, min, max, name, value_names, storage_type, parent_index, parent_value
+    {1, 1, 2, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {32, 0, 32, "TRIGLVL", nullptr, settings::STORAGE_TYPE_I32},
+};
+
+void ScopeChannel::Init()
+{
+  InitDefaults();
+
+  display_buffers_.Init();
+}
+
+// TODO this needs a better place to live
+uint16_t raw_buffer[kADCChunkSize];
+
+void ScopeChannel::Process(ADC_CHANNEL adc_channel)
+{
+  if (TU::ADC::ReadChunk(raw_buffer)) {
+    // Offset raw samples
+    auto tail = sample_buffer_.tail_buffer();
+    for (auto src = raw_buffer; src < raw_buffer + kADCChunkSize; ++src)
+      *tail++ = TU::ADC::offset_value(adc_channel, *src);
+
+    sample_buffer_.advance();
+    auto head = sample_buffer_.head_buffer();
+    auto trigger =
+        ScanBufferForTrigger<kADCChunkSize>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL), head);
+    if (trigger) {
+      ++trigger_count_;
+      if (display_buffers_.writeable()) {
+        auto display_buffer = display_buffers_.writeable_frame();
+
+        size_t n = trigger - head;
+        std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
+        display_buffer += kADCChunkSize - n;
+        std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
+        display_buffers_.written();
+      }
+    }
+  }
+}
+
+const int16_t *ScopeChannel::UpdateDisplayBuffer()
+{
+  if (display_buffers_.readable()) {
+    if (current_display_buffer_) display_buffers_.read();
+    current_display_buffer_ = display_buffers_.readable_frame();
+  }
+  return current_display_buffer_;
+}
+
 class ScopeApp {
 public:
   static constexpr int kNumChannels = 4;
@@ -154,8 +202,8 @@ public:
 
   void OnButton(const UI::Event &event);
   void OnEncoder(const UI::Event &event);
-  void Render() const;
-  void RenderScreensaver() const;
+  void Render();             // const;
+  void RenderScreensaver();  // const;
 
   void EventScreensaverOff();
 
@@ -174,7 +222,7 @@ private:
   ScopeChannel channels_[kNumChannels];
 
   void RenderMenu() const;
-  void RenderScope() const;
+  void RenderScope();  // const;
   void RenderScopeUI() const;
 };
 
@@ -185,8 +233,7 @@ void ScopeApp::Init()
 
 void ScopeApp::Process()
 {
-  auto sample = TU::ADC::raw_offset_value(current_adc_channel());
-  channels_[current_channel_].Process(sample);
+  channels_[current_channel_].Process(current_adc_channel());
 }
 
 void ScopeApp::UpdateUI()
@@ -252,7 +299,7 @@ void ScopeApp::OnEncoder(const UI::Event &event)
   }
 }
 
-void ScopeApp::Render() const
+void ScopeApp::Render()  // const
 {
   if (ui_.menu_active) {
     RenderMenu();
@@ -263,7 +310,7 @@ void ScopeApp::Render() const
   }
 }
 
-void ScopeApp::RenderScreensaver() const
+void ScopeApp::RenderScreensaver()  // const
 {
   RenderScope();
 }
@@ -284,19 +331,22 @@ void ScopeApp::RenderMenu() const
   menu::QuadTitleBar::Selected(current_channel_);
 }
 
-void ScopeApp::RenderScope() const
+void ScopeApp::RenderScope()  // const
 {
   auto &current_channel = channels_[current_channel_];
 
-  auto ydiv = current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV);
-  auto display_buffer = current_channel.display_buffer();
-  for (weegfx::coord_t x = 0; x < (kDisplayBufferSize - 1); ++x) {
-    auto y1 = 32 - ((ydiv * display_buffer[x]) >> 6);
+  auto display_buffer = current_channel.UpdateDisplayBuffer();
+  if (display_buffer) {
+    auto ydiv = current_channel.get_value(SCOPE_CHANNEL_SETTING_YDIV);
+    auto y1 = 32 - ((ydiv * display_buffer[0]) >> 6);
     CONSTRAIN(y1, 0, 63);
-    auto y2 = 32 - ((ydiv * display_buffer[x + 1]) >> 6);
-    CONSTRAIN(y2, 0, 63);
+    for (weegfx::coord_t x = 0; x < kDisplayBufferSize - 1; ++x) {
+      auto y2 = 32 - ((ydiv * display_buffer[x]) >> 6);
+      CONSTRAIN(y2, 0, 63);
 
-    graphics.drawLine(x, y1, x + 1, y2);
+      graphics.drawLine(x, y1, x + 1, y2);
+      y1 = y2;
+    }
   }
 }
 
@@ -321,7 +371,7 @@ void ScopeApp::RenderScopeUI() const
   auto x = 128 - weegfx::Graphics::kFixedFontW * 5;
 
   graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH);
-  graphics.print(current_channel.trigger_count(), 5);
+  graphics.print(current_channel.trigger_count() & 0xffff, 5);
 
   graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH * 2);
   graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);

@@ -62,6 +62,11 @@ public:
   // BUFFERED_MODE
   static size_t ReadChunk(uint16_t *buffer);
 
+  static int16_t offset_value(ADC_CHANNEL adc_channel, uint16_t value)
+  {
+    return calibration_data_->offset[adc_channel] - value;
+  }
+
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
   static constexpr uint8_t kAdcResolution = 12;

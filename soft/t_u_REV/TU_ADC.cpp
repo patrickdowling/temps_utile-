@@ -40,11 +40,12 @@ static constexpr ADC::Config kConfigNormal = {
 };
 
 static constexpr ADC::Config kConfigBuffered = {
-    .resolution = 16,
+    .resolution = 12,
     .averaging = 1,
-    .sampling_speed = ADC_HIGH_SPEED_16BITS,
-    .conversion_speed = ADC_HIGH_SPEED,
+    .sampling_speed = ADC_HIGH_SPEED,
+    .conversion_speed = ADC_MED_SPEED,
 };
+// 12, 1, ADC_HIGH_SPEED, ADC_MED_SPEED => ISR @ 2.1KHz x 128 = 268Khz = 3.7us per sample
 
 /*static*/ ADC::CalibrationData* ADC::calibration_data_ = nullptr;
 /*static*/ ADC::ADC_MODE ADC::mode_ = ADC::ADC_MODE_INVALID;
@@ -165,7 +166,7 @@ static void ADC_DMA_ISR()
 /*static*/ void ADC::InitDMASettingsBuffered()
 {
   unsigned int num_channels = 1;
-  unsigned int num_samples = 4;
+  unsigned int num_samples = kDMABufferSize;
 
   auto& mux = dma_settings_buffered[0];
   mux.sourceBuffer(adc_mux_buffer, 2 * num_channels);
@@ -184,7 +185,7 @@ static void ADC_DMA_ISR()
                             DMA_TCD_BITER_ELINKYES_ELINK;
   tcd->CSR = DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel) | DMA_TCD_CSR_MAJORELINK;
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
-  tcd->CSR |= DMA_TCD_CSR_INTMAJOR;
+  tcd->CSR |= DMA_TCD_CSR_INTHALF | DMA_TCD_CSR_INTMAJOR;
 #endif
   tcd->DLASTSGA = -(2 * num_samples);
 }
@@ -264,16 +265,16 @@ static void ADC_DMA_ISR()
 
 /*static*/ size_t ADC::ReadChunk(uint16_t* buffer)
 {
-  auto ptr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
-
+  auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
   auto chunk =
-      ((((uint32_t)ptr - (uint32_t)adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) %
-      kDMAMaxChunkCount;
+      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) % kDMAMaxChunkCount;
   if (chunk != last_chunk_) {
-    memcpy(buffer, adc_dma_buffer + chunk * kDMAChunkSize * 2, kDMAChunkSize);
+    memcpy(buffer, adc_dma_buffer + chunk * kDMAChunkSize, kDMAChunkSize * 2);
     last_chunk_ = chunk;
+    return kDMAChunkSize;
+  } else {
+    return 0;
   }
-  return chunk;
 }
 
 /*static*/ void ADC::CalibratePitch(int32_t c2, int32_t c4)

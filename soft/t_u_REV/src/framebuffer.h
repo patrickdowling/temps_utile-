@@ -14,51 +14,37 @@
 // transferred.
 // See https://gist.github.com/patrickdowling/0029f58fb20e63d7db9d
 
-template <size_t frame_size, size_t frames>
+template <size_t frame_size, size_t num_frames, typename T = uint8_t>
 class FrameBuffer {
 public:
-
   static const size_t kFrameSize = frame_size;
 
-  FrameBuffer() { }
+  FrameBuffer() {}
 
-  void Init() {
+  void Init()
+  {
     memset(frame_memory_, 0, sizeof(frame_memory_));
-    for (size_t f = 0; f < frames; ++f)
-      frame_buffers_[f] = frame_memory_ + kFrameSize * f;
+    for (size_t f = 0; f < num_frames; ++f) frame_buffers_[f] = frame_memory_ + kFrameSize * f;
     write_ptr_ = read_ptr_ = 0;
   }
 
-  size_t writeable() const {
-    return frames - readable();
-  }
+  size_t writeable() const { return num_frames - readable(); }
 
-  size_t readable() const {
-    return write_ptr_ - read_ptr_;
-  }
+  size_t readable() const { return write_ptr_ - read_ptr_; }
 
   // @return readable frame (assumes one exists)
-  const uint8_t *readable_frame() const {
-    return frame_buffers_[read_ptr_ % frames];
-  }
+  const T *readable_frame() const { return frame_buffers_[read_ptr_ % num_frames]; }
 
   // @return next writeable frame (assumes one exists)
-  uint8_t *writeable_frame() {
-    return frame_buffers_[write_ptr_ % frames];
-  }
+  T *writeable_frame() { return frame_buffers_[write_ptr_ % num_frames]; }
 
-  void read() {
-    ++read_ptr_;
-  }
+  void read() { ++read_ptr_; }
 
-  void written() {
-    ++write_ptr_;
-  }
+  void written() { ++write_ptr_; }
 
 private:
-
-  uint8_t frame_memory_[kFrameSize * frames] __attribute__ ((aligned (4)));
-  uint8_t *frame_buffers_[frames];
+  T frame_memory_[kFrameSize * num_frames] __attribute__((aligned(4)));
+  T *frame_buffers_[num_frames];
 
   volatile size_t write_ptr_;
   volatile size_t read_ptr_;
@@ -66,4 +52,4 @@ private:
   DISALLOW_COPY_AND_ASSIGN(FrameBuffer);
 };
 
-#endif // DRIVERS_FRAMEBUFFER_H_
+#endif  // DRIVERS_FRAMEBUFFER_H_
