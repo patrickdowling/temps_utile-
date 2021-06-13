@@ -56,5 +56,6 @@ static constexpr size_t kMaxTriggerDelayTicks = 96;
 //#define TU_CALIBRATION_DEFAULT_FLAGS (CALIBRATION_FLAG_ENCODERS_REVERSED)
 
 // #define TU_SERIAL_WAIT // if enable, wait for serial monitor at startup (not recommended for release)
+// #define TU_ADC_ENABLE_DEBUG_ISR
 
 #endif // TU_CONFIG_H_

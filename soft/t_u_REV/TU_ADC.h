@@ -1,13 +1,12 @@
 #ifndef TU_ADC_H_
 #define TU_ADC_H_
 
+#include <DMAChannel.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "TU_config.h"
 #include "src/ADC/OC_util_ADC.h"
-
-//#define ENABLE_ADC_DEBUG
 
 enum ADC_CHANNEL {
   ADC_CHANNEL_1,
@@ -19,8 +18,25 @@ enum ADC_CHANNEL {
 
 namespace TU {
 
+// There are two modes for ADC use:
+// ADC_MODE_NORMAL
+// This is just the "classic" implementation as ported from o_C. All channels are scanned via DMA,
+// the DMA disables after completion, and is restarted in ::Update after the values have been
+// averaged. This isn't _great_ but gets the job done. The scan runs "as fast as the ADC can
+// convert" since it's self-triggering. The app interface is via the per-channel getter functions.
+//
+// ADC_MODE_BUFFERED
+// This mode was implemented for the 'scope app, and just runs a continuous double/quad buffered DMA
+// acquisition, with the app grabbing chunks. The expectation is that any ReadChunk calls will be
+// more frequent than the buffer wraps around. This mode also provides a way to change the timing.
 class ADC {
 public:
+  static constexpr size_t kDMAChunkSize = 128;
+  static constexpr size_t kDMAMaxChunkCount = 2;
+  static constexpr size_t kDMABufferSize = kDMAChunkSize * kDMAMaxChunkCount;
+
+  enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_BUFFERED };
+
   struct CalibrationData {
     uint16_t offset[ADC_CHANNEL_LAST];
     uint16_t pitch_cv_scale;
@@ -35,13 +51,16 @@ public:
   // Start conversions in "original" mode, i.e. all four channels, averaging, etc.
   static void StartConversionNormal();
 
-  // Start conversions in immediate mode (details TBD)
-  static void StartConversionImmediate();
+  // Start conversions in buffered mode (details TBD)
+  static void StartConversionBuffered(ADC_CHANNEL channel);
 
   // Periodic update function (expected to run in main ISR)
   static void Update();
 
-  // IMMEDIATE_MODE
+  static ADC_MODE mode() { return mode_; }
+
+  // BUFFERED_MODE
+  static size_t ReadChunk(uint16_t *buffer);
 
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
@@ -95,11 +114,11 @@ private:
     smoothed_[channel] = value;
   }
 
-  enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_IMMEDIATE };
-
   static CalibrationData *calibration_data_;
   static ADC_MODE mode_;
   static ::ADC adc_;
+
+  static size_t last_chunk_;
 
   static uint32_t raw_[ADC_CHANNEL_LAST];
   static uint32_t smoothed_[ADC_CHANNEL_LAST];
@@ -107,8 +126,8 @@ private:
   static void Configure(const Config &config);
 
   static void InitDMASettingsNormal();
-  static void InitDMASettingsImmediate();
-  static void StartDMA();
+  static void InitDMASettingsBuffered();
+  static void StartDMA(DMASetting *dma_settings);
   static void StopDMA();
 
   // Deprecated?

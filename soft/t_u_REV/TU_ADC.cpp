@@ -1,23 +1,26 @@
 #include "TU_ADC.h"
 
-// #define TU_ADC_ENABLE_DMA_INTERRUPT
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-static volatile bool dma0_complete = false;
-#endif
-
 #include <algorithm>
 
-#include "DMAChannel.h"
 #include "TU_gpio.h"
 #include "src/util_misc.h"
 
 // NOTES
-// There are two ADCs, but we might not be able to usefully map pins; it seems like only A2/A3
-// are ADC0/1 capable, so CV1 only. This would also require 2x2 DMA streams to handle the muxing.
-//
-// - DMASetting/replaceSettingsOnCompletion to provide double buffering
+// - There are two ADCs, but we might not be able to usefully map pins; it seems like only A2/A3
+//   are ADC0/1 capable, so CV1 only. This would also require 2x2 DMA streams to handle the muxing.
 // - There's a half-transfer interrupt, but no equivalent to DMA_TCD_CSR_DONE?
 // - For scope use, there are comparators?
+// - Many of the lengths are in bytes, even if a different pointer type is specified
+//
+// NOTE about continuous mode
+// I tried to use scatter/gather/replaceSettingsOnCompletion (i.e. setting DLASTSGA to point to a
+// new TCD) which worked great, and seems to lead to cleaner handling of multiple buffers. But
+// there's a but -- as soon as this is activated, it stops the SPI DMA tx from working, and I was
+// unable to figure out why (which isn't saying much). Neither chip erratas nor forums provided any
+// insight, the DMA channel would complete but SPI0_TCR wouldn't change. Among the things tried were
+// adding an rx channel (which is normally ignored) etc. pp. The only thing that seemed promising
+// was upping the transfer size to 16/32 bits which fills the SPI0_PUSHR register differently so is
+// completely different. So, we're just using a big buffer and polling the position.
 
 namespace TU {
 
@@ -39,32 +42,36 @@ static constexpr ADC::Config kConfigNormal = {
 /*static*/ ADC::CalibrationData* ADC::calibration_data_ = nullptr;
 /*static*/ ADC::ADC_MODE ADC::mode_ = ADC::ADC_MODE_INVALID;
 /*static*/ ::ADC ADC::adc_;
+/*static*/ size_t ADC::last_chunk_ = 0xffffffff;
+
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_LAST];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_LAST];
 
-#define DMA_BUF_SIZE 16
-#define DMA_NUM_CH ADC_CHANNEL_LAST
 // below: channel ids for the ADCx_SCA register: we have 4 inputs
 // CV1 (17) = A3 = 0x49; CV2 (20) = A6 = 0x46; CV3 (19) = A5 = 0x4C; CV4 (18) = A4 = 0x4D
-//
-// We have to ensure DMA is started in the correct order, so that SCA is written first. Otherwise,
-// the channel that reads from the ADC will read the "old" value and the values are out of order
-// (see older revisions of this file).
-static constexpr uint16_t SCA_CHANNEL_ID[DMA_NUM_CH] = {0x49, 0x46, 0x4C, 0x4D};
+static constexpr uint16_t SCA_CHANNEL_ID[ADC_CHANNEL_LAST] = {0x49, 0x46, 0x4C, 0x4D};
 
-static DMAChannel dma0{false};  // dma0 channel, fills adcbuffer_0
-static DMAChannel dma1{false};  // dma1 channel, updates ADC0_SC1A which holds the channel/pin IDs
-DMAMEM static volatile uint16_t adcbuffer_0[DMA_BUF_SIZE]
-    __attribute__((aligned(DMA_BUF_SIZE + 0)));
+DMAMEM static uint16_t adc_mux_buffer[ADC_CHANNEL_LAST] __attribute__((aligned(4)));
+DMAMEM static uint16_t adc_dma_buffer[ADC::kDMABufferSize] __attribute__((aligned(4)));
 
-// Maintain basic DMA settings for each mode
-// This doesn't include some things like linking, which we have to setup manually
+static DMAChannel dma_channel_mux{false};  // buffer which holds the channel/pin IDs -> ADC0_SC1A
+static DMAChannel dma_channel_adc{false};  // ADC0_RA -> buffer
+
+// Maintain basic DMA settings for each mode for "easy" switching.
+// This doesn't include some things like linking, which we have to setup manually.
+// settings[0] = mux
+// settings[1] = adc -> buffer
 static DMASetting dma_settings_normal[2];
-static DMASetting dma_settings_immediate[2];
+static DMASetting dma_settings_buffered[2];
 
-// #define TU_ADC_ENABLE_DMA_INTERRUPT
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-static volatile bool dma0_complete = false;
+#ifdef TU_ADC_ENABLE_DEBUG_ISR
+#define TU_ADC_DEBUG_PIN 12
+static void ADC_DMA_ISR()
+{
+  digitalWriteFast(TU_ADC_DEBUG_PIN, HIGH);
+  dma_channel_adc.clearInterrupt();
+  digitalWriteFast(TU_ADC_DEBUG_PIN, LOW);
+}
 #endif
 
 /*static*/ void ADC::Init(CalibrationData* calibration_data)
@@ -72,19 +79,26 @@ static volatile bool dma0_complete = false;
   calibration_data_ = calibration_data;
   std::fill(raw_, raw_ + ADC_CHANNEL_LAST, 0);
   std::fill(smoothed_, smoothed_ + ADC_CHANNEL_LAST, 0);
-  std::fill(adcbuffer_0, adcbuffer_0 + DMA_BUF_SIZE, 0);
+  std::fill(adc_dma_buffer, adc_dma_buffer + kDMABufferSize, 0);
 
   adc_.setReference(ADC_REF_3V3);
 
-  dma0.begin(true);  // allocate the DMA channel
-  dma1.begin(true);  // allocate the DMA channel
-  SERIAL_PRINTLN("[ADC] dma0.channel=%x", dma0.channel);
-  SERIAL_PRINTLN("[ADC] dma1.channel=%x", dma1.channel);
+  dma_channel_mux.begin(true);  // allocate the DMA channel
+  dma_channel_adc.begin(true);  // allocate the DMA channel
+  SERIAL_PRINTLN("[ADC] dma_channel_mux.channel=%x", dma_channel_mux.channel);
+  SERIAL_PRINTLN("[ADC] dma_channel_adc.channel=%x", dma_channel_adc.channel);
+
+  dma_channel_adc.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
+#ifdef TU_ADC_ENABLE_DEBUG_ISR
+  dma_channel_adc.attachInterrupt(ADC_DMA_ISR);
+  pinMode(TU_ADC_DEBUG_PIN, OUTPUT);
+#endif
 
   InitDMASettingsNormal();
-  InitDMASettingsImmediate();
+  InitDMASettingsBuffered();
 
   StartConversionNormal();
+  // StartConversionBuffered(ADC_CHANNEL_1);
 }
 
 /*static*/ void ADC::Configure(const Config& config)
@@ -95,176 +109,167 @@ static volatile bool dma0_complete = false;
   adc_.setAveraging(config.averaging);
 }
 
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-static void DMA0_ISR_NORMAL()
-{
-  dma0_complete = true;
-  dma0.TCD->DADDR = &adcbuffer_0[0];
-  dma0.clearInterrupt();
-  // DMA is either restarted in ::Update, or disableOnCompletion is not set
-}
-#endif
-
 // DMA/ADC à la
 // https://forum.pjrc.com/threads/30171-Reconfigure-ADC-via-a-DMA-transfer-to-allow-multiple-Channel-Acquisition
 // basically, this sets up two DMA channels and cycles through the four adc mux channels (until the
-// buffer is full), resets, and so on; dma1 advances SCA_CHANNEL_ID somewhat like
+// buffer is full), resets, and so on; dma_channel_mux advances SCA_CHANNEL_ID somewhat like
 // https://www.nxp.com/docs/en/application-note/AN4590.pdf but w/o the PDB.
 /*static*/ void ADC::InitDMASettingsNormal()
 {
-  // Normal DMA settings
-  dma_settings_normal[0].TCD->SADDR = &ADC0_RA;
-  dma_settings_normal[0].TCD->SOFF = 0;
-  dma_settings_normal[0].TCD->ATTR = 0x101;
-  dma_settings_normal[0].TCD->NBYTES = 2;
-  dma_settings_normal[0].TCD->SLAST = 0;
-  dma_settings_normal[0].TCD->DADDR = &adcbuffer_0[0];
-  dma_settings_normal[0].TCD->DOFF = 2;
-  dma_settings_normal[0].TCD->DLASTSGA = -(2 * DMA_BUF_SIZE);
-  dma_settings_normal[0].TCD->BITER = DMA_BUF_SIZE;
-  dma_settings_normal[0].TCD->CITER = DMA_BUF_SIZE;
+  static constexpr unsigned int num_channels = ADC_CHANNEL_LAST;
+  static constexpr unsigned int num_samples = 4;
+  static constexpr unsigned int buffer_size = (num_channels * num_samples);
+  static_assert(buffer_size <= kDMABufferSize, "DMA buffer too small for normal mode");
 
-  dma_settings_normal[1].TCD->SADDR = &SCA_CHANNEL_ID[0];
-  dma_settings_normal[1].TCD->SOFF = 2;  // source increment each transfer (n bytes)
-  dma_settings_normal[1].TCD->ATTR = 0x101;
-  dma_settings_normal[1].TCD->SLAST = -(DMA_NUM_CH * 2);  // num ADC0 samples * 2
-  dma_settings_normal[1].TCD->BITER = DMA_NUM_CH;
-  dma_settings_normal[1].TCD->CITER = DMA_NUM_CH;
-  dma_settings_normal[1].TCD->DADDR = &ADC0_SC1A;
-  dma_settings_normal[1].TCD->DLASTSGA = 0;
-  dma_settings_normal[1].TCD->NBYTES = 2;
-  dma_settings_normal[1].TCD->DOFF = 0;
+  dma_settings_normal[0].sourceBuffer(adc_mux_buffer, 2 * num_channels);
+  dma_settings_normal[0].destination(*(volatile uint16_t*)&ADC0_SC1A);
+
+  auto tcd = dma_settings_normal[1].TCD;
+  tcd->SADDR = &ADC0_RA;
+  tcd->SOFF = 0;
+  tcd->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
+  tcd->NBYTES = 2;
+  tcd->SLAST = 0;
+  tcd->DADDR = adc_dma_buffer;
+  tcd->DOFF = 2;
+  tcd->CITER = tcd->BITER = buffer_size | DMA_TCD_BITER_ELINKYES_ELINK |
+                            DMA_TCD_BITER_ELINKYES_LINKCH(dma_channel_mux.channel);
+  tcd->CSR = DMA_TCD_CSR_MAJORELINK | DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel);
+  tcd->CSR |= DMA_TCD_CSR_DREQ;
+#ifdef TU_ADC_ENABLE_DEBUG_ISR
+  tcd->CSR |= DMA_TCD_CSR_INTMAJOR;
+#endif
+  tcd->DLASTSGA = -(2 * buffer_size);
 }
 
 /*static*/ void ADC::StartConversionNormal()
 {
   if (ADC_MODE_NORMAL != mode_) {
+    SERIAL_PRINTLN("[ADC] StartConversionNormal");
+
     StopDMA();
     Configure(kConfigNormal);
 
-    SERIAL_PRINTLN("[ADC] StartConversionNormal");
+    std::copy(SCA_CHANNEL_ID, SCA_CHANNEL_ID + ADC_CHANNEL_LAST, adc_mux_buffer);
+    StartDMA(dma_settings_normal);
+
     mode_ = ADC_MODE_NORMAL;
-
-    dma0 = dma_settings_normal[0];
-    dma0.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
-    dma0.disableOnCompletion();
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-    dma0.interruptAtCompletion();
-    dma0.attachInterrupt(DMA0_ISR_NORMAL);
-#endif
-    dma1 = dma_settings_normal[1];
-    dma1.triggerAtTransfersOf(dma0);
-    dma1.triggerAtCompletionOf(dma0);
-
-    StartDMA();
   }
 }
 
-/*static*/ void ADC::InitDMASettingsImmediate()
+/*static*/ void ADC::InitDMASettingsBuffered()
 {
-  int32_t buf_size = 4;
-  dma_settings_immediate[0].TCD->SADDR = &ADC0_RA;
-  dma_settings_immediate[0].TCD->SOFF = 0;
-  dma_settings_immediate[0].TCD->ATTR = 0x101;
-  dma_settings_immediate[0].TCD->NBYTES = 2;
-  dma_settings_immediate[0].TCD->SLAST = 0;
-  dma_settings_immediate[0].TCD->DADDR = &adcbuffer_0[0];
-  dma_settings_immediate[0].TCD->DOFF = 2;
-  dma_settings_immediate[0].TCD->DLASTSGA = -(2 * buf_size);
-  dma_settings_immediate[0].TCD->BITER = buf_size;
-  dma_settings_immediate[0].TCD->CITER = buf_size;
+  unsigned int num_channels = 1;
+  unsigned int num_samples = 4;
 
-  uint16_t num_channels = 1;
-  dma_settings_immediate[1].TCD->SADDR = &SCA_CHANNEL_ID[0];
-  dma_settings_immediate[1].TCD->SOFF = 2;  // source increment each transfer (n bytes)
-  dma_settings_immediate[1].TCD->ATTR = 0x101;
-  dma_settings_immediate[1].TCD->SLAST = -(num_channels * 2);  // num ADC0 samples * 2
-  dma_settings_immediate[1].TCD->BITER = num_channels;
-  dma_settings_immediate[1].TCD->CITER = num_channels;
-  dma_settings_immediate[1].TCD->DADDR = &ADC0_SC1A;
-  dma_settings_immediate[1].TCD->DLASTSGA = 0;
-  dma_settings_immediate[1].TCD->NBYTES = 2;
-  dma_settings_immediate[1].TCD->DOFF = 0;
+  auto& mux = dma_settings_buffered[0];
+  mux.sourceBuffer(adc_mux_buffer, 2 * num_channels);
+  mux.destination(*(volatile uint16_t*)&ADC0_SC1A);
+
+  // These are a bit more complex since we want to link them, as well as use the copy-on-completion
+  auto tcd = dma_settings_buffered[1].TCD;
+  tcd->SADDR = &ADC0_RA;
+  tcd->SOFF = 0;
+  tcd->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
+  tcd->NBYTES = 2;
+  tcd->SLAST = 0;
+  tcd->DADDR = adc_dma_buffer;
+  tcd->DOFF = 2;
+  tcd->CITER = tcd->BITER = num_samples | DMA_TCD_BITER_ELINKYES_LINKCH(dma_channel_mux.channel) |
+                            DMA_TCD_BITER_ELINKYES_ELINK;
+  tcd->CSR = DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel) | DMA_TCD_CSR_MAJORELINK;
+#ifdef TU_ADC_ENABLE_DEBUG_ISR
+  tcd->CSR |= DMA_TCD_CSR_INTMAJOR;
+#endif
+  tcd->DLASTSGA = -(2 * num_samples);
 }
 
-/*static*/ void ADC::StartConversionImmediate()
+/*static*/ void ADC::StartConversionBuffered(ADC_CHANNEL channel)
 {
-  if (ADC_MODE_IMMEDIATE != mode_) {
+  if (ADC_MODE_BUFFERED != mode_) {
+    SERIAL_PRINTLN("[ADC] StartConversionBuffered");
+
     StopDMA();
+    Configure(kConfigNormal);
 
-    SERIAL_PRINTLN("[ADC] StartConversionImmediate");
-    mode_ = ADC_MODE_IMMEDIATE;
+    adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
+    StartDMA(dma_settings_buffered);
 
-    dma0 = dma_settings_immediate[0];
-    dma0.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
-
-    dma1 = dma_settings_immediate[1];
-    dma1.triggerAtTransfersOf(dma0);
-    dma1.triggerAtCompletionOf(dma0);
-
-    StartDMA();
+    mode_ = ADC_MODE_BUFFERED;
   }
 }
 
 /*static*/ void ADC::StopDMA()
 {
-  SERIAL_PRINTLN("[ADC] StopDMA");
+  if (ADC_MODE_INVALID != mode_) {
+    SERIAL_PRINTLN("[ADC] StopDMA (mode=%x)", mode_);
+    adc_.disableDMA();
+    dma_channel_mux.disable();
+    dma_channel_adc.disable();
+    dma_channel_adc.clearComplete();
 
-  adc_.disableDMA();
-
-  dma1.disable();
-  dma1.clearComplete();
-
-  dma0.disable();
-  dma0.clearComplete();
-  dma0.detachInterrupt();
-  dma0.TCD->CSR &= ~(DMA_TCD_CSR_INTMAJOR | DMA_TCD_CSR_DREQ);
-
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-  dma0_complete = false;
-#endif
+    mode_ = ADC_MODE_INVALID;
+  }
 }
 
-/*static*/ void ADC::StartDMA()
+/*static*/ void ADC::StartDMA(DMASetting* dma_settings)
 {
   SERIAL_PRINTLN("[ADC] StartDMA");
+
+  dma_channel_mux = dma_settings[0];
+  dma_channel_adc = dma_settings[1];
+
+  // We have to ensure DMA is started in the correct order, so that SCA is written first. Otherwise,
+  // the channel that reads from the ADC will read the "old" value and the values are out of order
+  // (see older revisions of this file).
   adc_.enableDMA();
-  dma1.enable();
-  dma1.triggerManual();
-  dma0.enable();
+  dma_channel_mux.enable();
+  dma_channel_mux.triggerManual();
+  dma_channel_adc.enable();
 }
 
 /*static*/ void FASTRUN ADC::Update()
 {
   if (ADC_MODE_NORMAL == mode_) {
-#ifdef TU_ADC_ENABLE_DMA_INTERRUPT
-    if (dma0_complete) {
-      dma0_complete = false;
-#else
-    if (dma0.complete()) {
-      dma0.clearComplete();
-#endif
-
-      // collect results from adcbuffer_0; there's DMA_BUF_SIZE = 16 samples in the buffer.
+    if (dma_channel_adc.complete()) {
+      dma_channel_adc.clearComplete();
+      // Update channel values from adc_dma_buffer; there's 4 samples per channel in the buffer so
+      // we can average the values.
       uint32_t value;
-      // / 4 = DMA_BUF_SIZE / DMA_NUM_CH
-      value = (adcbuffer_0[0] + adcbuffer_0[4] + adcbuffer_0[8] + adcbuffer_0[12]) >> 2;
+      value = (adc_dma_buffer[0] + adc_dma_buffer[4] + adc_dma_buffer[8] + adc_dma_buffer[12]) >> 2;
       update<ADC_CHANNEL_1>(value);
 
-      value = (adcbuffer_0[1] + adcbuffer_0[5] + adcbuffer_0[9] + adcbuffer_0[13]) >> 2;
+      value = (adc_dma_buffer[1] + adc_dma_buffer[5] + adc_dma_buffer[9] + adc_dma_buffer[13]) >> 2;
       update<ADC_CHANNEL_2>(value);
 
-      value = (adcbuffer_0[2] + adcbuffer_0[6] + adcbuffer_0[10] + adcbuffer_0[14]) >> 2;
+      value =
+          (adc_dma_buffer[2] + adc_dma_buffer[6] + adc_dma_buffer[10] + adc_dma_buffer[14]) >> 2;
       update<ADC_CHANNEL_3>(value);
 
-      value = (adcbuffer_0[3] + adcbuffer_0[7] + adcbuffer_0[11] + adcbuffer_0[15]) >> 2;
+      value =
+          (adc_dma_buffer[3] + adc_dma_buffer[7] + adc_dma_buffer[11] + adc_dma_buffer[15]) >> 2;
       update<ADC_CHANNEL_4>(value);
 
-      dma0.enable();  // disableOnCompletion -> need to restart
+      dma_channel_adc.enable();  // disableOnCompletion -> need to restart
     }
   } else {
-    update<ADC_CHANNEL_1>((adcbuffer_0[0] + adcbuffer_0[1] + adcbuffer_0[2] + adcbuffer_0[3]) >> 2);
+    auto src = adc_dma_buffer;  // + kDMAChunkSize;
+    update<ADC_CHANNEL_1>((src[0] + src[1] + src[2] + src[3]) >> 2);
   }
+}
+
+/*static*/ size_t ADC::ReadChunk(uint16_t* buffer)
+{
+  auto ptr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
+
+  auto chunk =
+      ((((uint32_t)ptr - (uint32_t)adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) %
+      kDMAMaxChunkCount;
+  if (chunk != last_chunk_) {
+    memcpy(buffer, adc_dma_buffer + chunk * kDMAChunkSize * 2, kDMAChunkSize);
+    last_chunk_ = chunk;
+  }
+  return chunk;
 }
 
 /*static*/ void ADC::CalibratePitch(int32_t c2, int32_t c4)
