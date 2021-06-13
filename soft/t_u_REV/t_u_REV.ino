@@ -97,7 +97,6 @@ void setup() {
 
   delay(50);
   NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
-  TU::OUTPUTS::SPI_Init();
 #ifdef MODEL_2TT
   SERIAL_PRINTLN("* 2TT BOOTING...");
 #else

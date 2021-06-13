@@ -53,7 +53,6 @@ public:
   };
 
   static void Init(CalibrationData *calibration_data);
-  static void SPI_Init();
   
   static void zero_all() {
     for (int i = CLOCK_CHANNEL_1; i < CLOCK_CHANNEL_LAST; i++)
