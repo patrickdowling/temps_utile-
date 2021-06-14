@@ -162,7 +162,7 @@ private:
   FrameBuffer<kDisplayBufferSize, 2, int16_t> display_buffers_;
   const int16_t *current_display_buffer_ = nullptr;
 
-  CircularSampleBuffer<int16_t, kADCChunkSize, 3> sample_buffer_;
+  CircularSampleBuffer<int16_t, kADCChunkSize, 4> sample_buffer_;
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
@@ -410,7 +410,7 @@ void ScopeApp::RenderScopeUI() const
     }
   }
 
-  graphics.drawBitmap8(0, 32 - (current_channel.trigger_level() >> 6) - 4, TU::kBitmapLoopMarkerW,
+  graphics.drawBitmap8(0, 32 - (current_channel.trigger_level() >> 6) - 1, TU::kBitmapLoopMarkerW,
                        TU::bitmap_loop_markers_8);
 
   auto x = 128 - weegfx::Graphics::kFixedFontW * 5;
@@ -458,7 +458,7 @@ void SCOPE_handleAppEvent(TU::AppEvent event)
     case TU::APP_EVENT_SUSPEND: break;
     case TU::APP_EVENT_SCREENSAVER_ON: break;
     case TU::APP_EVENT_SCREENSAVER_OFF: scope::scope_app_instance.EventScreensaverOff(); break;
-    case TU::APP_EVENT_ACTIVATE: TU::ADC::StartConversionBuffered(ADC_CHANNEL_1); break;
+    case TU::APP_EVENT_ACTIVATE: TU::ADC::StartConversionBuffered(ADC_CHANNEL_1, 1000 * 128); break;
     default: break;
   }
 }

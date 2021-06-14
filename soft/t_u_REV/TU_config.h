@@ -57,5 +57,6 @@ static constexpr size_t kMaxTriggerDelayTicks = 96;
 
 // #define TU_SERIAL_WAIT // if enable, wait for serial monitor at startup (not recommended for release)
 // #define TU_ADC_ENABLE_DEBUG_ISR
+// #define TU_ADC_DEBUG_SERIAL
 
 #endif // TU_CONFIG_H_

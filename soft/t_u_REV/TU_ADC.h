@@ -16,6 +16,14 @@ enum ADC_CHANNEL {
   ADC_CHANNEL_LAST,
 };
 
+#ifdef TU_ADC_DEBUG_SERIAL
+#define ADC_SERIAL_PRINTLN(...) SERIAL_PRINTLN("[ADC] " __VA_ARGS__)
+#else
+#define ADC_SERIAL_PRINTLN(...) \
+  do {                          \
+  } while (0)
+#endif
+
 namespace TU {
 
 // There are two modes for ADC use:
@@ -52,7 +60,7 @@ public:
   static void StartConversionNormal();
 
   // Start conversions in buffered mode (details TBD)
-  static void StartConversionBuffered(ADC_CHANNEL channel);
+  static void StartConversionBuffered(ADC_CHANNEL channel, uint32_t freq);
 
   // Periodic update function (expected to run in main ISR)
   static void Update();
@@ -108,6 +116,9 @@ public:
     return (value * calibration_data_->pitch_cv_scale) >> 12;
   }
 
+  // DEBUG
+  static volatile void *DEBUG_DADDR();
+
 private:
   template <ADC_CHANNEL channel>
   static void update(uint32_t value)
@@ -134,6 +145,8 @@ private:
   static void InitDMASettingsBuffered();
   static void StartDMA(ADC_MODE mode, DMASetting *dma_settings);
   static void StopDMA();
+  static void StartPDB(uint32_t freq);
+  static void StopPDB();
 
   // Deprecated?
 public:

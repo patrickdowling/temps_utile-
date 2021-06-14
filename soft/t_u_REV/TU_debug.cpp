@@ -68,16 +68,19 @@ static void debug_menu_gfx() {
 
 static void debug_menu_adc() {
   graphics.setPrintPos(2, 12);
+  graphics.printf("mode=%x", ADC::mode());
+    graphics.setPrintPos(2, 22);
 
   if (ADC::ADC_MODE_NORMAL == ADC::mode()) {
     graphics.printf("CV1 %5d %5u", ADC::value<ADC_CHANNEL_1>(), ADC::raw_value(ADC_CHANNEL_1));
-    graphics.setPrintPos(2, 22);
-    graphics.printf("CV2 %5d %5u", ADC::value<ADC_CHANNEL_2>(), ADC::raw_value(ADC_CHANNEL_2));
     graphics.setPrintPos(2, 32);
-    graphics.printf("CV3 %5d %5u", ADC::value<ADC_CHANNEL_3>(), ADC::raw_value(ADC_CHANNEL_3));
+    graphics.printf("CV2 %5d %5u", ADC::value<ADC_CHANNEL_2>(), ADC::raw_value(ADC_CHANNEL_2));
     graphics.setPrintPos(2, 42);
+    graphics.printf("CV3 %5d %5u", ADC::value<ADC_CHANNEL_3>(), ADC::raw_value(ADC_CHANNEL_3));
+    graphics.setPrintPos(2, 52);
     graphics.printf("CV4 %5d %5u", ADC::value<ADC_CHANNEL_4>(), ADC::raw_value(ADC_CHANNEL_4));
   } else if (ADC::ADC_MODE_BUFFERED == ADC::mode()) {
+    graphics.printf("DADDR %p", ADC::DEBUG_DADDR());
     // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
     // graphics.setPrintPos(2, 22);
     // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
@@ -88,11 +91,6 @@ static void debug_menu_adc() {
   }
 
   graphics.setPrintPos(2, 52);
-  graphics.printf("mode=%x", ADC::mode());
-
-//      graphics.print((long)ADC::busy_waits());
-//      graphics.setPrintPos(2, 42); graphics.print(ADC::fail_flag0());
-//      graphics.setPrintPos(2, 52); graphics.print(ADC::fail_flag1());
 }
 
 struct DebugMenu {

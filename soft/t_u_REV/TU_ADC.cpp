@@ -1,6 +1,7 @@
 #include "TU_ADC.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include "TU_gpio.h"
 #include "src/util_misc.h"
@@ -43,7 +44,7 @@ static constexpr ADC::Config kConfigBuffered = {
     .resolution = 12,
     .averaging = 1,
     .sampling_speed = ADC_HIGH_SPEED,
-    .conversion_speed = ADC_MED_SPEED,
+    .conversion_speed = ADC_HIGH_SPEED,
 };
 // 12, 1, ADC_HIGH_SPEED_16BITS, ADC_HIGH_SPEED => ISR @ 3.7KHz x 128 = 474Khz
 // 12, 1, ADC_HIGH_SPEED, ADC_MED_SPEED => ISR @ 2.1KHz x 128 = 268Khz = 3.7us per sample
@@ -94,8 +95,8 @@ static void ADC_DMA_ISR()
 
   dma_channel_mux.begin(true);  // allocate the DMA channel
   dma_channel_adc.begin(true);  // allocate the DMA channel
-  SERIAL_PRINTLN("[ADC] dma_channel_mux.channel=%x", dma_channel_mux.channel);
-  SERIAL_PRINTLN("[ADC] dma_channel_adc.channel=%x", dma_channel_adc.channel);
+  ADC_SERIAL_PRINTLN("dma_channel_mux.channel=%x", dma_channel_mux.channel);
+  ADC_SERIAL_PRINTLN("dma_channel_adc.channel=%x", dma_channel_adc.channel);
 
   dma_channel_adc.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
@@ -107,7 +108,6 @@ static void ADC_DMA_ISR()
   InitDMASettingsBuffered();
 
   StartConversionNormal();
-  // StartConversionBuffered(ADC_CHANNEL_1);
 }
 
 /*static*/ void ADC::Configure(const Config& config)
@@ -154,8 +154,9 @@ static void ADC_DMA_ISR()
 /*static*/ void ADC::StartConversionNormal()
 {
   if (ADC_MODE_NORMAL != mode_) {
-    SERIAL_PRINTLN("[ADC] StartConversionNormal");
+    ADC_SERIAL_PRINTLN("StartConversionNormal");
 
+    StopPDB();
     StopDMA();
     Configure(kConfigNormal);
 
@@ -191,23 +192,28 @@ static void ADC_DMA_ISR()
   tcd->DLASTSGA = -(2 * num_samples);
 }
 
-/*static*/ void ADC::StartConversionBuffered(ADC_CHANNEL channel)
+/*static*/ void ADC::StartConversionBuffered(ADC_CHANNEL channel, uint32_t freq)
 {
   if (ADC_MODE_BUFFERED != mode_) {
-    SERIAL_PRINTLN("[ADC] StartConversionBuffered");
+    ADC_SERIAL_PRINTLN("StartConversionBuffered");
 
     StopDMA();
     Configure(kConfigBuffered);
 
     adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
     StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
+    StartPDB(freq);
+  } else {
+    // Changing parameters on-the-fly. We too like to live dangerously...
+    adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
+    StartPDB(freq);
   }
 }
 
 /*static*/ void ADC::StopDMA()
 {
   if (ADC_MODE_INVALID != mode_) {
-    SERIAL_PRINTLN("[ADC] StopDMA (mode=%x)", mode_);
+    ADC_SERIAL_PRINTLN("StopDMA (mode=%x)", mode_);
     adc_.disableDMA();
     dma_channel_mux.disable();
     dma_channel_adc.disable();
@@ -220,7 +226,7 @@ static void ADC_DMA_ISR()
 /*static*/ void ADC::StartDMA(ADC_MODE mode, DMASetting* dma_settings)
 {
   mode_ = mode;
-  SERIAL_PRINTLN("[ADC] StartDMA (mode=%x)", mode_);
+  ADC_SERIAL_PRINTLN("StartDMA (mode=%x)", mode_);
 
   dma_channel_mux = dma_settings[0];
   dma_channel_adc = dma_settings[1];
@@ -228,10 +234,99 @@ static void ADC_DMA_ISR()
   // We have to ensure DMA is started in the correct order, so that SCA is written first. Otherwise,
   // the channel that reads from the ADC will read the "old" value and the values are out of order
   // (see older revisions of this file).
+  // For buffered mode, we're using hardware triggering of conversions via the PDB but we still want
+  // the correct mux value.
   adc_.enableDMA();
   dma_channel_mux.enable();
   dma_channel_mux.triggerManual();
   dma_channel_adc.enable();
+}
+
+// clang-format off
+// generated via https://gist.github.com/patrickdowling/880d5035b4049a7467b81cfda9472e05
+static constexpr struct { uint8_t prescaler; uint8_t mult; } kPDBPrescalerValues[] = {
+    //{ .prescaler=0, .mult=0 }, // 1 x 0xffff = 65535
+    {.prescaler = 1, .mult = 0},  // 2 x 0xffff = 131070
+    {.prescaler = 2, .mult = 0},  // 4 x 0xffff = 262140
+    {.prescaler = 3, .mult = 0},  // 8 x 0xffff = 524280
+    {.prescaler = 0, .mult = 1},  // 10 x 0xffff = 655350
+    {.prescaler = 4, .mult = 0},  // 16 x 0xffff = 1048560
+    {.prescaler = 0, .mult = 2},  // 20 x 0xffff = 1310700
+    {.prescaler = 5, .mult = 0},  // 32 x 0xffff = 2097120
+    {.prescaler = 0, .mult = 3},  // 40 x 0xffff = 2621400
+    {.prescaler = 6, .mult = 0},  // 64 x 0xffff = 4194240
+    {.prescaler = 1, .mult = 3},  // 80 x 0xffff = 5242800
+    {.prescaler = 7, .mult = 0},  // 128 x 0xffff = 8388480
+    {.prescaler = 2, .mult = 3},  // 160 x 0xffff = 10485600
+    {.prescaler = 3, .mult = 3},  // 320 x 0xffff = 20971200
+    {.prescaler = 4, .mult = 3},  // 640 x 0xffff = 41942400
+    {.prescaler = 5, .mult = 3},  // 1280 x 0xffff = 83884800
+    {.prescaler = 6, .mult = 3},  // 2560 x 0xffff = 167769600
+    {.prescaler = 7, .mult = 3},  // 5120 x 0xffff = 335539200
+};
+// clang-format on
+static constexpr uint32_t kPDBMult[4] = {1, 10, 20, 40};
+constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
+{
+  return 0xffff * (1U << prescaler) * kPDBMult[mult];
+}
+
+/*static*/ void ADC::StartPDB(uint32_t freq)
+{
+  ADC_SERIAL_PRINTLN("StartPDB(%lu)", freq);
+
+  uint32_t pdb_mod = F_BUS / freq;
+  uint32_t pdb_prescaler = 0;
+  uint32_t pdb_mult = 0;
+  if (pdb_mod > 0xffff) {
+    // We're just looking up a suitable value. The table removes the duplicate settings, it's not
+    // immediately apparent if some are "better". The reference manual just suggests to keep the
+    // value small. It can probably also just be calculated at runtime fairly easily.
+    auto prescaler_value =
+        std::upper_bound(std::begin(kPDBPrescalerValues), std::end(kPDBPrescalerValues), pdb_mod,
+                         [](uint32_t value, const auto& pv) {
+                           return value < pdb_prescaler_value(pv.prescaler, pv.mult);
+                         });
+
+    if (std::end(kPDBPrescalerValues) != prescaler_value) {
+      pdb_prescaler = prescaler_value->prescaler;
+      pdb_mult = prescaler_value->mult;
+    } else {
+      ADC_SERIAL_PRINTLN("Unable to find prescaler/mult values for F_BUS=%lu freq=%lu (mod=%lu)",
+                         (uint32_t)F_BUS, freq, pdb_mod);
+      return;
+    }
+
+    pdb_mod >>= pdb_prescaler;
+    if (pdb_mult) pdb_mod = (pdb_mod / 10) >> (pdb_mult - 1);
+  }
+  ADC_SERIAL_PRINTLN("F_BUS=%lu freq=%lu pdb_mod=%lu pdb_prescaler=%lu pdb_mult=%lu => %lu",
+                     (uint32_t)F_BUS, freq, pdb_mod, pdb_prescaler, pdb_mult,
+                     pdb_prescaler_value(pdb_prescaler, pdb_mult));
+
+  SIM_SCGC6 |= SIM_SCGC6_PDB;
+  ADC0_SC2 |= ADC_SC2_ADTRG;  // ADC hardware trigger
+
+  uint32_t pdb_sc = PDB_SC_TRGSEL(15) | PDB_SC_PDBEN | PDB_SC_CONT | PDB_SC_LDMOD(0);
+  pdb_sc |= PDB_SC_PRESCALER(pdb_prescaler);
+  pdb_sc |= PDB_SC_MULT(pdb_mult);
+
+  PDB0_SC = 0;
+  PDB0_IDLY = 0;
+  PDB0_MOD = pdb_mod - 1;
+  PDB0_SC = pdb_sc | PDB_SC_LDOK;
+  PDB0_SC = pdb_sc | PDB_SC_SWTRIG;
+  PDB0_CH0C1 = 0x0101;  // PDB_CH0C1_TOS | PDB_CH0C1_EN;
+}
+
+/*static*/ void ADC::StopPDB()
+{
+  ADC_SERIAL_PRINTLN("StopPDB");
+  if (SIM_SCGC6 & SIM_SCGC6_PDB) {
+    // only access if clock enabled
+    PDB0_SC = 0;
+  }
+  ADC0_SC2 &= ~ADC_SC2_ADTRG;  // ADC software trigger
 }
 
 /*static*/ void FASTRUN ADC::Update()
@@ -276,6 +371,11 @@ static void ADC_DMA_ISR()
   } else {
     return 0;
   }
+}
+
+/*static*/ volatile void* ADC::DEBUG_DADDR()
+{
+  return dma_channel_adc.TCD->DADDR;
 }
 
 /*static*/ void ADC::CalibratePitch(int32_t c2, int32_t c4)
