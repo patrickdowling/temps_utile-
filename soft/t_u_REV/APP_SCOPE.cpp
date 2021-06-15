@@ -29,6 +29,7 @@
 #include "TU_debug.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
+#include "util/util_popup.h"
 #include "util/util_settings.h"
 
 // NOTES
@@ -66,34 +67,6 @@ private:
 
 static constexpr uint32_t kSettingTimeoutTicks = 5000;
 static constexpr uint32_t kMenuTimeoutTicks = 30000;
-
-class PopupElement {
-public:
-  bool visible() const { return visible_; }
-
-  void Tick(uint32_t ticks)
-  {
-    if (visible_) {
-      if (ticks - start_ticks_ > timeout_) visible_ = false;
-    }
-  }
-
-  void hide() { visible_ = false; };
-  void show()
-  {
-    visible_ = true;
-    start_ticks_ = TU::ui.ticks();
-  }
-
-  void poke() { start_ticks_ = TU::ui.ticks(); }
-
-  void set_timeout(uint32_t timeout) { timeout_ = timeout; }
-
-private:
-  bool visible_ = false;
-  uint32_t start_ticks_ = 0;
-  uint32_t timeout_ = kSettingTimeoutTicks;
-};
 
 class TriggerProcessor {
 public:
@@ -238,7 +211,8 @@ private:
     bool menu_active = false;
     bool edit_trigger_level = false;
 
-    PopupElement ydiv_display;
+    util::PopupElement xdiv_display;
+    util::PopupElement ydiv_display;
   } ui_;
 
   int current_channel_{0};
