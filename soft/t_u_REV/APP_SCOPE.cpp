@@ -110,6 +110,8 @@ static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
 };
 
 enum ScopeChannelSettings {
+  SCOPE_CHANNEL_SETTING_XOFF,
+  SCOPE_CHANNEL_SETTING_YOFF,
   SCOPE_CHANNEL_SETTING_XDIV,
   SCOPE_CHANNEL_SETTING_YDIV,
   SCOPE_CHANNEL_SETTING_TRIG_TYPE,
@@ -156,8 +158,8 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_valuea
     {0, 0, 127, "XOFF", nullptr, settings::STORAGE_TYPE_I16},
     {0, -32, 32, "YOFF", nullptr, settings::STORAGE_TYPE_I16},
-    {1, 1, 4, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
-    {1, 0, scope::TIMEBASE_LAST - 1, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {1, 0, scope::TIMEBASE_LAST - 1, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {1, 1, 4, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
     {1, 1, 1, "TRIG TYPE", nullptr, settings::STORAGE_TYPE_U8},
     {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
 };
