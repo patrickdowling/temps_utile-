@@ -97,6 +97,18 @@ public:
   }
 };
 
+enum TimebaseDivision { TIMEBASE_1, TIMEBASE_2, TIMEBASE_3, TIMEBASE_LAST };
+struct TimebaseParameters {
+  const char *const label;
+  uint32_t adc_frequency;
+};
+
+static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
+    {"500", .adc_frequency = 500 * 128},
+    {"1000", .adc_frequency = 1000 * 128},
+    {"2000", .adc_frequency = 2000 * 128},
+};
+
 enum ScopeChannelSettings {
   SCOPE_CHANNEL_SETTING_XDIV,
   SCOPE_CHANNEL_SETTING_YDIV,
@@ -129,6 +141,8 @@ public:
     return static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
   }
 
+  const TimebaseParameters &current_timebase() const { return kTimebaseParameters[xdiv()]; }
+
 private:
   uint32_t trigger_count_{0};
 
@@ -139,9 +153,11 @@ private:
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
-    // default, min, max, name, value_names, storage_type, parent_index, parent_value
-    {1, 1, 2, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
+    // default, min, max, name, value_names, storage_type, parent_index, parent_valuea
+    {0, 0, 127, "XOFF", nullptr, settings::STORAGE_TYPE_I16},
+    {0, -32, 32, "YOFF", nullptr, settings::STORAGE_TYPE_I16},
     {1, 1, 4, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {1, 0, scope::TIMEBASE_LAST - 1, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
     {1, 1, 1, "TRIG TYPE", nullptr, settings::STORAGE_TYPE_U8},
     {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
 };
@@ -203,6 +219,7 @@ public:
   void RenderScreensaver();  // const;
 
   void EventScreensaverOff();
+  void Activate();
 
   static void RenderGrid();
 
@@ -245,6 +262,7 @@ void ScopeApp::Process()
 void ScopeApp::UpdateUI()
 {
   auto ticks = TU::ui.ticks();
+  ui_.xdiv_display.Tick(ticks);
   ui_.ydiv_display.Tick(ticks);
 }
 
@@ -303,14 +321,21 @@ void ScopeApp::OnEncoder(const UI::Event &event)
       CONSTRAIN(channel, 0, kNumChannels - 1);
       current_channel_ = channel;
     }
-  }
-  if (TU::CONTROL_ENCODER_R == event.control) {
-    if (ui_.edit_trigger_level) {
-      current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
-    } else {
-      current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+
+  } else {
+    if (TU::CONTROL_ENCODER_L == event.control) {
+      if (current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value))
+        TU::ADC::StartConversionBuffered(ADC_CHANNEL_1,
+                                         kTimebaseParameters[current_channel.xdiv()].adc_frequency);
+      ui_.xdiv_display.show();
+    } else if (TU::CONTROL_ENCODER_R == event.control) {
+      if (ui_.edit_trigger_level) {
+        current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
+      } else {
+        current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+      }
+      ui_.ydiv_display.show();
     }
-    ui_.ydiv_display.show();
   }
 }
 
@@ -333,6 +358,8 @@ void ScopeApp::RenderScreensaver()  // const
 void ScopeApp::EventScreensaverOff()
 {
   ui_.menu_active = false;
+  ui_.xdiv_display.show();
+  ui_.ydiv_display.show();
 }
 
 void ScopeApp::RenderMenu() const
@@ -374,12 +401,16 @@ void ScopeApp::RenderScopeUI() const
   graphics.print((char)('1' + current_channel_));
   graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
 
+  if (ui_.xdiv_display.visible()) {
+    graphics.setPrintPos(0, 64 - 8);
+    graphics.print(current_channel.current_timebase().label);
+  }
   if (ui_.ydiv_display.visible()) {
     if (ui_.edit_trigger_level) {
-      graphics.setPrintPos(128 - 5 * weegfx::Graphics::kFixedFontW, 0);
+      graphics.setPrintPos(128 - 5 * weegfx::Graphics::kFixedFontW, 64 - 8);
       graphics.pretty_print(current_channel.trigger_level(), 5);
     } else {
-      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 0);
+      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 64 - 8);
       graphics.printf("x%d", current_channel.ydiv());
     }
   }
@@ -389,11 +420,16 @@ void ScopeApp::RenderScopeUI() const
 
   auto x = 128 - weegfx::Graphics::kFixedFontW * 5;
 
-  graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH);
+  graphics.setPrintPos(x, 0);
   graphics.print(current_channel.trigger_count() & 0xffff, 5);
 
-  graphics.setPrintPos(x, 64 - weegfx::Graphics::kFixedFontH * 2);
+  graphics.setPrintPos(x, weegfx::Graphics::kFixedFontH);
   graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
+}
+
+void ScopeApp::Activate()
+{
+  TU::ADC::StartConversionBuffered(ADC_CHANNEL_1, 1000 * 128);
 }
 
 static ScopeApp scope_app_instance;
@@ -428,11 +464,11 @@ void SCOPE_reset()
 void SCOPE_handleAppEvent(TU::AppEvent event)
 {
   switch (event) {
-    case TU::APP_EVENT_RESUME: break;
+    case TU::APP_EVENT_RESUME: scope::scope_app_instance.EventScreensaverOff(); break;
     case TU::APP_EVENT_SUSPEND: break;
     case TU::APP_EVENT_SCREENSAVER_ON: break;
     case TU::APP_EVENT_SCREENSAVER_OFF: scope::scope_app_instance.EventScreensaverOff(); break;
-    case TU::APP_EVENT_ACTIVATE: TU::ADC::StartConversionBuffered(ADC_CHANNEL_1, 1000 * 128); break;
+    case TU::APP_EVENT_ACTIVATE: scope::scope_app_instance.Activate();
     default: break;
   }
 }
