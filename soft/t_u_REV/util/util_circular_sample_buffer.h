@@ -27,6 +27,8 @@
 
 #include <stdint.h>
 
+#include <iterator>
+
 namespace util {
 
 template <typename T, size_t buffer_size>
@@ -35,19 +37,21 @@ public:
   using value_type = T;
   static constexpr size_t kBufferSize = buffer_size;
 
-  class Writer {
+  // This is just a (very) minimal iterator construct
+  class Writer : public std::iterator<std::output_iterator_tag, T> {
   public:
     Writer(CircularSampleBuffer *owner, T *buffer, size_t write_pos)
         : owner_(owner), buffer_(buffer), write_pos_(write_pos)
     {}
 
-    T &operator*() { return buffer_[write_pos_ % kBufferSize]; }
+    T &operator*() const { return buffer_[write_pos_ % kBufferSize]; }
 
-    Writer &operator++(int)
+    Writer &operator++()
     {
       ++write_pos_;
       return *this;
     }
+    Writer operator++(int) { return {owner_, buffer_, write_pos_++}; }
 
     void Commit() { owner_->Commit(write_pos_); }
 

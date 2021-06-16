@@ -42,7 +42,8 @@
 
 // NOTES
 // - SIMD processing of buffers?
-// - Raw values from ADC are inverted, so we use calibration offset
+// - Raw values from ADC are inverted, but calibration offset is applied
+// - For linked channels, the assumption is that everything will /2 and "just work"
 
 namespace scope {
 
@@ -532,8 +533,7 @@ void ScopeApp::Process()
     // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
 #else
     // TODO without decimation, this step is somewhat moot
-    for (auto src = adc_chunk->buffer, end = src + kADCChunkSize; src < end; ++src)
-      *sample_writer++ = *src;
+    sample_writer = std::copy(adc_chunk->buffer, adc_chunk->buffer + kADCChunkSize, sample_writer);
 #endif
     adc_chunks.read();
     sample_writer.Commit();

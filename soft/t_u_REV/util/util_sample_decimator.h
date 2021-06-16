@@ -29,13 +29,14 @@ namespace util {
 class SampleDecimator {
 public:
   template <size_t buffer_length, typename output_it>
-  static void Process(output_it &dst, const int16_t *src, size_t stride)
+  static void Process(output_it dst, const int16_t *src, size_t stride)
   {
     auto end = src + buffer_length;
     while (src < end) {
       *dst++ = *src;
       src += stride;
     }
+    return dst;
   }
 };
 
