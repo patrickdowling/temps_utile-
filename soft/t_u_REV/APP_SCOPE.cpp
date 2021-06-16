@@ -79,7 +79,7 @@ private:
   template <size_t buffer_length>
   static const int16_t *Nop(int16_t, const int16_t *buffer)
   {
-    return buffer;
+    return nullptr;
   }
 
   template <size_t buffer_length, typename cmp>
@@ -185,7 +185,7 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     {1, 0, scope::TIMEBASE_LAST - 1, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
     {1, 1, 4, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
     {scope::TriggerProcessor::TRIGGER_TYPE_RISING, scope::TriggerProcessor::TRIGGER_TYPE_NONE,
-     scope::TriggerProcessor::TRIGGER_TYPE_FALLING, "TRIG TYPE", scope::kTriggerTypeStrings,
+     scope::TriggerProcessor::TRIGGER_TYPE_LAST - 1, "TRIG TYPE", scope::kTriggerTypeStrings,
      settings::STORAGE_TYPE_U8},
     {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
 };
@@ -246,6 +246,8 @@ private:
     util::PopupElement info_overlay;
 
     menu::ScreenCursor<menu::kScreenLines> cursor;
+
+    volatile bool trigger_found = false;
   } ui_;
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
@@ -311,9 +313,15 @@ void ScopeApp::Process()
     sample_buffer_.advance();
 
     auto trigger = current_channel().Process(sample_buffer_);
-    if (trigger && display_buffers_.writeable()) {
-      auto display_buffer = display_buffers_.writeable_frame();
+    if (!trigger) {
+      trigger = sample_buffer_.head_buffer();
+      ui_.trigger_found = false;
+    } else {
+      ui_.trigger_found = true;
+    }
 
+    if (display_buffers_.writeable()) {
+      auto display_buffer = display_buffers_.writeable_frame();
       size_t n = trigger - sample_buffer_.head_buffer();
       std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
       display_buffer += kADCChunkSize - n;
@@ -509,9 +517,8 @@ static const uint8_t channel_2_8x8[] = {0xff, 0x01, 0x01, 0x75, 0x55, 0x59, 0x01
 static const uint8_t channel_3_8x8[] = {0xff, 0x01, 0x01, 0x55, 0x55, 0x7d, 0x01, 0xff};
 static const uint8_t channel_4_8x8[] = {0xff, 0x01, 0x01, 0x1d, 0x11, 0x79, 0x01, 0xff};
 
-static const uint8_t trigger_none_8x8[] = {0x00, 0x00, 0x14, 0x08, 0x3E, 0x08, 0x14, 0x00};
-static const uint8_t trigger_rising_edge_8x8[] = {0x00, 0x40, 0x40, 0x40, 0x7c, 0x04, 0x04, 0x00};
-static const uint8_t trigger_falling_edge_8x8[] = {0x00, 0x04, 0x04, 0x04, 0x7c, 0x40, 0x40, 0x00};
+static const uint8_t trigger_rising_edge_8x8[] = {0x00, 0x80, 0x90, 0x98, 0xff, 0x19, 0x11, 0x00};
+static const uint8_t trigger_falling_edge_8x8[] = {0x00, 0x01, 0x09, 0x19, 0xff, 0x98, 0x88, 0x00};
 static const uint8_t trigger_ext1_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x08, 0x7c};
 static const uint8_t trigger_ext2_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x74, 0x5c};
 
@@ -525,8 +532,7 @@ static constexpr const uint8_t *channels[4] = {
 };
 
 static constexpr const uint8_t *trigger_type_icons[TriggerProcessor::TRIGGER_TYPE_LAST] = {
-    trigger_none_8x8, trigger_rising_edge_8x8, trigger_falling_edge_8x8,
-    trigger_ext1_8x8, trigger_ext2_8x8,
+    nullptr, trigger_rising_edge_8x8, trigger_falling_edge_8x8, trigger_ext1_8x8, trigger_ext2_8x8,
 };
 
 };  // namespace icons
@@ -562,7 +568,16 @@ void ScopeApp::RenderScopeUI() const
   }
 
   const uint8_t *icon = icons::trigger_type_icons[channel.trigger_type()];
-  if (icon) graphics.drawBitmap8(128 - 8, 0, 8, icon);
+  weegfx::coord_t x = 128 - 8;
+  if (icon) {
+    graphics.drawBitmap8(128 - 8, 0, 8, icon);
+    x -= 7;
+  }
+  if (!ui_.trigger_found) {
+    graphics.setPrintPos(x, 0);
+    graphics.print('?');
+  }
+
   if (ui_.info_overlay.visible()) {
     graphics.setPrintPos(32, 0);
     graphics.print(channel.trigger_count() & 0xffff, 5);
@@ -571,7 +586,7 @@ void ScopeApp::RenderScopeUI() const
     graphics.print(debug::cycles_to_us(process_cycles.value()), 5);
   }
 
-  graphics.setPrintPos(128 - 30, weegfx::Graphics::kFixedFontH);
+  graphics.setPrintPos(128 - 30 - 18, 0);
   graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
 }
 
