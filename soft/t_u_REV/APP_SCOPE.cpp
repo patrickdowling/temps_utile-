@@ -31,6 +31,7 @@
 #include "TU_debug.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
+#include "UI/ui_event_dispatcher.h"
 #include "arm_math.h"
 #include "util/util_circular_sample_buffer.h"
 #include "util/util_popup.h"
@@ -249,7 +250,7 @@ void ScopeChannel::UpdateEnabledSettings()
   num_enabled_settings_ = settings - enabled_settings_;
 }
 
-class ScopeApp {
+class ScopeApp : public UI::EventDispatcher<ScopeApp> {
 public:
   static constexpr int kNumChannels = 4;
 
@@ -260,15 +261,11 @@ public:
   size_t Save(util::StreamBufferWriter &stream_buffer) const;
   size_t Restore(util::StreamBufferReader &stream_buffer);
 
-  void OnButton(const UI::Event &event);
-  void OnEncoder(const UI::Event &event);
   void Render();             // const;
   void RenderScreensaver();  // const;
 
   void EventScreensaverOff();
   void Activate();
-
-  static void RenderGrid();
 
 private:
   struct {
@@ -304,11 +301,34 @@ private:
   ScopeChannel &current_channel() { return channels_[current_channel_]; }
   const ScopeChannel &current_channel() const { return channels_[current_channel_]; }
 
-  void RenderMenu() const;
+  static void RenderGrid();
   static void RenderDisplayBuffer(const int16_t *display_buffer, const int32_t multiplier);
+  void RenderMenu() const;
   void RenderScopeUI() const;
 
   void UpdateDisplayBuffer();
+
+  // Event handlers
+  friend class EventDispatcher;
+  const EventHandler *get_event_handlers() const
+  {
+    return ui_.menu_active ? menu_event_handlers : scope_button_handlers;
+  }
+
+  static const EventHandler menu_event_handlers[];
+  static const EventHandler scope_button_handlers[];
+
+  EVENT_DISPATCH_DECLARE_HANDLER(toggleMenu);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeInfoOverlay);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonDown);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonL);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonR);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeEncoderL);
+  EVENT_DISPATCH_DECLARE_HANDLER(scopeEncoderR);
+  EVENT_DISPATCH_DECLARE_HANDLER(menuButtonL);
+  EVENT_DISPATCH_DECLARE_HANDLER(menuButtonR);
+  EVENT_DISPATCH_DECLARE_HANDLER(menuEncoderL);
+  EVENT_DISPATCH_DECLARE_HANDLER(menuEncoderR);
 };
 
 /*static*/ uint16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
@@ -397,6 +417,156 @@ size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
 
+/*static*/ const ScopeApp::EventHandler ScopeApp::menu_event_handlers[] = {
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleMenu},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::menuButtonL},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::menuButtonR},
+    {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::menuEncoderL},
+    {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_R, &ScopeApp::menuEncoderR},
+    {},
+};
+
+/*static*/ const ScopeApp::EventHandler ScopeApp::scope_button_handlers[] = {
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleMenu},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::scopeButtonDown},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::scopeButtonL},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::scopeButtonR},
+    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::scopeInfoOverlay},
+    {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::scopeEncoderL},
+    {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_R, &ScopeApp::scopeEncoderR},
+    {},
+};
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, toggleMenu)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  if (ui_.menu_active) {
+    ui_.menu_active = false;
+  } else {
+    ui_.menu_active = true;
+    ui_.cursor.AdjustEnd(current_channel().num_enabled_settings());
+  }
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeInfoOverlay)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  ui_.info_overlay.show();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonDown)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  auto &channel = current_channel();
+  channel.change_value_wrap(SCOPE_CHANNEL_SETTING_TRIG_TYPE, 1);
+  channel.UpdateEnabledSettings();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonL)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  ui_.edit_setting_l = SCOPE_CHANNEL_SETTING_XDIV == ui_.edit_setting_l
+                           ? SCOPE_CHANNEL_SETTING_LAST
+                           : SCOPE_CHANNEL_SETTING_XDIV;
+  ui_.status_bar.show();
+  ui_.edit_setting.hide();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonR)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
+      TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
+    ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
+    ui_.edit_setting.show();
+    ui_.status_bar.hide();
+  } else {
+    ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
+    ui_.status_bar.show();
+    ui_.edit_setting.hide();
+  }
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderL)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  auto &channel = current_channel();
+  bool update_adc = false;
+  switch (ui_.edit_setting_l) {
+    case SCOPE_CHANNEL_SETTING_XDIV:
+      update_adc = channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event_value);
+      break;
+    case SCOPE_CHANNEL_SETTING_LAST: {
+      auto channel = current_channel_ + event_value;
+      CONSTRAIN(channel, 0, kNumChannels - 1);
+      if (channel != current_channel_) {
+        current_channel_ = channel;
+        update_adc = true;
+      }
+    } break;
+    default: break;
+  }
+  ui_.edit_setting.hide();
+  ui_.status_bar.show();
+  if (update_adc)
+    TU::ADC::StartConversionBuffered(channel.timebase().adc_frequency, current_adc_channel());
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  auto &channel = current_channel();
+  switch (ui_.edit_setting_r) {
+    case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
+      channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event_value * 32);
+      ui_.edit_setting.show();
+      ui_.status_bar.hide();
+      break;
+    case SCOPE_CHANNEL_SETTING_YDIV: channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event_value);
+    default: ui_.status_bar.show(); break;
+  }
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuButtonL)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuButtonR)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  ui_.cursor.toggle_editing();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderL)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+}
+
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderR)
+{
+  EVENT_DISPATCH_HANDLER_STUB();
+
+  if (!ui_.cursor.editing()) {
+    ui_.cursor.Scroll(event_value);
+  } else {
+    auto &channel = current_channel();
+    auto selected = channel.enabled_setting_at(ui_.cursor.cursor_pos());
+    if (channel.change_value(selected, event_value)) {
+      channel.UpdateEnabledSettings();
+      ui_.cursor.AdjustEnd(channel.num_enabled_settings());
+    }
+  }
+}
+
 /*static*/ void ScopeApp::RenderGrid()
 {
   graphics.drawVLinePattern(16, 0, 64, 0x88);
@@ -410,107 +580,6 @@ size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
   graphics.drawHLinePattern(0, 16, 128, 4);
   graphics.drawHLinePattern(0, 32, 128, 2);
   graphics.drawHLinePattern(0, 48, 128, 4);
-}
-
-void ScopeApp::OnButton(const UI::Event &event)
-{
-  if (UI::EVENT_BUTTON_LONG_PRESS == event.type) {
-    if (!ui_.menu_active) {
-      if (TU::CONTROL_BUTTON_DOWN == event.control) ui_.info_overlay.show();
-    }
-    return;
-  }
-
-  if (TU::CONTROL_BUTTON_UP == event.control) {
-    ui_.menu_active = !ui_.menu_active;
-    return;
-  }
-
-  if (ui_.menu_active) {
-    if (TU::CONTROL_BUTTON_R == event.control) { ui_.cursor.toggle_editing(); }
-  } else {
-    switch (event.control) {
-      case TU::CONTROL_BUTTON_DOWN: ui_.info_overlay.show(); break;
-      case TU::CONTROL_BUTTON_L: {
-        ui_.edit_setting_l = SCOPE_CHANNEL_SETTING_XDIV == ui_.edit_setting_l
-                                 ? SCOPE_CHANNEL_SETTING_LAST
-                                 : SCOPE_CHANNEL_SETTING_XDIV;
-        ui_.status_bar.show();
-        ui_.edit_setting.hide();
-      } break;
-      case TU::CONTROL_BUTTON_R: {
-        if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
-            TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
-          ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
-          ui_.edit_setting.show();
-          ui_.status_bar.hide();
-        } else {
-          ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
-          ui_.status_bar.show();
-          ui_.edit_setting.hide();
-        }
-      } break;
-      default: break;
-    }
-  }
-}
-
-void ScopeApp::OnEncoder(const UI::Event &event)
-{
-  auto &current_channel = channels_[current_channel_];
-
-  if (ui_.menu_active) {
-    if (TU::CONTROL_ENCODER_L == event.control) {
-      // auto channel = current_channel_ + event.value;
-      // CONSTRAIN(channel, 0, kNumChannels - 1);
-      // current_channel_ = channel;
-    } else if (TU::CONTROL_ENCODER_R == event.control) {
-      if (!ui_.cursor.editing()) {
-        ui_.cursor.Scroll(event.value);
-      } else {
-        auto selected = current_channel.enabled_setting_at(ui_.cursor.cursor_pos());
-        if (current_channel.change_value(selected, event.value)) {
-          current_channel.UpdateEnabledSettings();
-          ui_.cursor.AdjustEnd(current_channel.num_enabled_settings());
-        }
-      }
-    }
-
-  } else {
-    if (TU::CONTROL_ENCODER_L == event.control) {
-      bool update_adc = false;
-      switch (ui_.edit_setting_l) {
-        case SCOPE_CHANNEL_SETTING_XDIV:
-          update_adc = current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value);
-          break;
-        case SCOPE_CHANNEL_SETTING_LAST: {
-          auto channel = current_channel_ + event.value;
-          CONSTRAIN(channel, 0, kNumChannels - 1);
-          if (channel != current_channel_) {
-            current_channel_ = channel;
-            update_adc = true;
-          }
-        } break;
-        default: break;
-      }
-      ui_.edit_setting.hide();
-      ui_.status_bar.show();
-      if (update_adc)
-        TU::ADC::StartConversionBuffered(current_channel.timebase().adc_frequency,
-                                         current_adc_channel());
-    } else if (TU::CONTROL_ENCODER_R == event.control) {
-      switch (ui_.edit_setting_r) {
-        case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
-          current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
-          ui_.edit_setting.show();
-          ui_.status_bar.hide();
-          break;
-        case SCOPE_CHANNEL_SETTING_YDIV:
-          current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
-        default: ui_.status_bar.show(); break;
-      }
-    }
-  }
 }
 
 void ScopeApp::Render()  // const
@@ -598,7 +667,6 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
 }
 
 namespace icons {
-
 static const uint8_t channel_1_8x8[] = {0xff, 0x01, 0x01, 0x09, 0x7d, 0x01, 0x01, 0xff};
 static const uint8_t channel_2_8x8[] = {0xff, 0x01, 0x01, 0x75, 0x55, 0x59, 0x01, 0xff};
 static const uint8_t channel_3_8x8[] = {0xff, 0x01, 0x01, 0x55, 0x55, 0x7d, 0x01, 0xff};
@@ -794,12 +862,12 @@ void SCOPE_screensaver()
 
 void SCOPE_handleButtonEvent(const UI::Event &event)
 {
-  scope::scope_app_instance.OnButton(event);
+  scope::scope_app_instance.DispatchEvent(event);
 }
 
 void SCOPE_handleEncoderEvent(const UI::Event &event)
 {
-  scope::scope_app_instance.OnEncoder(event);
+  scope::scope_app_instance.DispatchEvent(event);
 }
 
 void SCOPE_isr()

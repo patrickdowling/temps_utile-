@@ -109,6 +109,13 @@ public:
     return apply_value(index, values_[index] + delta);
   }
 
+  bool change_value_wrap(size_t index, int delta) {
+    int value = get_value(index) + delta;
+    if (value < value_attr_[index].min_) value = value_attr_[index].max_;
+    if (value > value_attr_[index].max_) value = value_attr_[index].min_;
+    return apply_value(index, value);
+  }
+
   bool change_value_max(size_t index, int delta, int max) {
     if (index < num_settings) {
       int clamped = value_attr_[index].clamp(values_[index] + delta);
