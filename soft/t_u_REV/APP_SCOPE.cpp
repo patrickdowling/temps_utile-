@@ -30,6 +30,7 @@
 #include "TU_ADC.h"
 #include "TU_debug.h"
 #include "TU_menus.h"
+#include "TU_strings.h"
 #include "TU_ui.h"
 #include "UI/ui_event_dispatcher.h"
 #include "arm_math.h"
@@ -166,7 +167,8 @@ enum ScopeChannelSetting {
   SCOPE_CHANNEL_SETTING_FIRST = SCOPE_CHANNEL_SETTING_XOFF,
 };
 
-class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
+class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST>,
+                     public settings::DynamicSettings<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
 public:
   void Init();
 
@@ -202,14 +204,9 @@ public:
 
   // UI helpers
   void UpdateEnabledSettings();
-  int num_enabled_settings() const { return num_enabled_settings_; }
-  int enabled_setting_at(int index) const { return enabled_settings_[index]; }
 
 private:
   uint32_t trigger_count_{0};
-
-  int num_enabled_settings_{0};
-  ScopeChannelSetting enabled_settings_[SCOPE_CHANNEL_SETTING_LAST];
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
@@ -233,27 +230,27 @@ void ScopeChannel::Init()
 
 void ScopeChannel::UpdateEnabledSettings()
 {
-  auto settings = enabled_settings_;
-
-  *settings++ = SCOPE_CHANNEL_SETTING_TRIG_TYPE;
+  enabled_settings_reset();
+  enabled_settings_add(SCOPE_CHANNEL_SETTING_TRIG_TYPE);
   switch (trigger_type()) {
     case TriggerProcessor::TRIGGER_TYPE_NONE:
     case TriggerProcessor::TRIGGER_TYPE_EXT1:
     case TriggerProcessor::TRIGGER_TYPE_EXT2: break;
-    default: *settings++ = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
+    default: enabled_settings_add(SCOPE_CHANNEL_SETTING_TRIG_LEVEL);
   }
-  *settings++ = SCOPE_CHANNEL_SETTING_XOFF;
-  *settings++ = SCOPE_CHANNEL_SETTING_YOFF;
-  *settings++ = SCOPE_CHANNEL_SETTING_XDIV;
-  *settings++ = SCOPE_CHANNEL_SETTING_YDIV;
-
-  num_enabled_settings_ = settings - enabled_settings_;
+  enabled_settings_add(SCOPE_CHANNEL_SETTING_XOFF);
+  enabled_settings_add(SCOPE_CHANNEL_SETTING_YOFF);
+  enabled_settings_add(SCOPE_CHANNEL_SETTING_XDIV);
+  enabled_settings_add(SCOPE_CHANNEL_SETTING_YDIV);
 }
 
 enum ScopeAppSetting {
   SCOPE_APP_SETTING_CHANNEL,
+  SCOPE_APP_SETTING_LINK12,
+  SCOPE_APP_SETTING_LINK34,
   SCOPE_APP_SETTING_RESET,  // dummy
-  SCOPE_APP_SETTING_LAST
+  SCOPE_APP_SETTING_LAST,
+  SCOPE_APP_SETTING_FIRST = SCOPE_APP_SETTING_CHANNEL
 };
 
 class ScopeApp : public settings::SettingsBase<ScopeApp, SCOPE_APP_SETTING_LAST>,
@@ -351,18 +348,19 @@ private:
 SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
+    {0, 0, 1, "Link 1+2", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
+    {0, 0, 1, "Link 3+4", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Reset", nullptr, settings::STORAGE_TYPE_NOP},
 };
 
 void ScopeApp::Init()
 {
   InitDefaults();
-
   for (auto &channel : channels_) channel.Init();
-  display_buffers_.Init();
 
-  ui_.cursor.Init(SCOPE_CHANNEL_SETTING_FIRST, SCOPE_CHANNEL_SETTING_LAST - 1);
-  ui_.cursor.AdjustEnd(current_channel().num_enabled_settings() - 1);
+  display_buffers_.Init();
+  ui_.cursor.Init(SCOPE_APP_SETTING_FIRST, SCOPE_APP_SETTING_LAST - 1);
+  // ui_.cursor.AdjustEnd(current_channel().num_enabled_settings() - 1);
 }
 
 void ScopeApp::Process()
@@ -440,7 +438,7 @@ size_t ScopeApp::RestoreState(util::StreamBufferReader &stream_buffer)
 
 /*static*/ const ScopeApp::EventHandler ScopeApp::menu_event_handlers[] = {
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleMenu},
-    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::menuButtonL},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::menuButtonL},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::menuButtonR},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::menuEncoderL},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_R, &ScopeApp::menuEncoderR},
@@ -466,7 +464,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, toggleMenu)
     ui_.menu_active = false;
   } else {
     ui_.menu_active = true;
-    ui_.cursor.AdjustEnd(current_channel().num_enabled_settings());
+    // ui_.cursor.AdjustEnd(current_channel().num_enabled_settings());
   }
 }
 
@@ -559,7 +557,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuButtonR)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  ui_.cursor.toggle_editing();
+  if (SCOPE_APP_SETTING_CHANNEL != ui_.cursor.cursor_pos()) ui_.cursor.toggle_editing();
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderL)
@@ -574,12 +572,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderR)
   if (!ui_.cursor.editing()) {
     ui_.cursor.Scroll(event_value);
   } else {
-    auto &channel = current_channel();
-    auto selected = channel.enabled_setting_at(ui_.cursor.cursor_pos());
-    if (channel.change_value(selected, event_value)) {
-      channel.UpdateEnabledSettings();
-      ui_.cursor.AdjustEnd(channel.num_enabled_settings());
-    }
+    change_value(ui_.cursor.cursor_pos(), event_value);
   }
 }
 
@@ -635,26 +628,18 @@ void ScopeApp::UpdateDisplayBuffer()
 
 void ScopeApp::RenderMenu() const
 {
-  menu::QuadTitleBar::Draw(true);
-  for (int i = 0; i < 4; ++i) {
-    menu::QuadTitleBar::SetColumn(i);
-    graphics.print((char)('1' + i));
-  }
-  menu::QuadTitleBar::Selected(current_channel_index());
+  menu::DefaultTitleBar::Draw();
+  graphics.print("SCOPE");
 
-  auto &channel = current_channel();
   menu::SettingsList<menu::kScreenLines, 0, menu::kDefaultValueX> settings_list{ui_.cursor};
 
   menu::SettingsListItem list_item;
   while (settings_list.available()) {
-    int setting = channel.enabled_setting_at(settings_list.Next(list_item));
-    int value = channel.get_value(setting);
-    auto &attr = ScopeChannel::value_attr(setting);
+    int setting = settings_list.Next(list_item);
+    int value = get_value(setting);
+    auto &attr = ScopeApp::value_attr(setting);
 
     switch (setting) {
-      case SCOPE_CHANNEL_SETTING_YDIV:
-        list_item.DrawDefault(channel.scaling().label, value, attr);
-        break;
       default: list_item.DrawDefault(value, attr); break;
     }
   }

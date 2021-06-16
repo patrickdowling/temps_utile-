@@ -276,6 +276,26 @@ template <> const settings::value_attr settings::SettingsBase<clazz, last>::valu
 #define VALID_IF(parent, value) \
 parent + 1, static_cast<int>(value)
 
+template <typename T, size_t num_settings>
+class DynamicSettings {
+public:
+  int num_enabled_settings() const { return num_enabled_settings_; }
+  int enabled_settings_at(int index) const { return enabled_settings_[index]; }
+
+protected:
+  int num_enabled_settings_ = 0;
+  int enabled_settings_[num_settings];
+
+  template <typename S>
+  void enabled_settings_add(S s) {
+    enabled_settings_[num_enabled_settings_++] = s;
+  }
+
+  void enabled_settings_reset() {
+    num_enabled_settings_ = 0;
+  }
+};
+
 }; // namespace settings
 
 #endif // SETTINGS_H_
