@@ -35,6 +35,7 @@
 #include "UI/ui_event_dispatcher.h"
 #include "arm_math.h"
 #include "util/util_circular_sample_buffer.h"
+#include "util/util_edge_detector.h"
 #include "util/util_popup.h"
 #include "util/util_settings.h"
 
@@ -97,13 +98,16 @@ public:
 
 private:
   Stats stats_;
-  int16_t last_sample_{0};
+
+  using EdgeDetector = util::EdgeDetector<int16_t>;
+
+  EdgeDetector::State edge_detector_state_ = 0;
 
   template <size_t buffer_length>
   TriggerOffset Nop(int16_t, const int16_t *buffer)
   {
     stats_.sample_count += buffer_length;
-    last_sample_ = buffer[buffer_length - 1];
+    edge_detector_state_ = 0;
     return buffer_length;
   }
 
@@ -113,37 +117,26 @@ private:
     auto buf = buffer;
     auto end = buffer + buffer_length;
     auto edge_count = stats_.edge_count;
-    const int16_t *trigger = nullptr;
+    const int16_t *first_edge = nullptr;
 
-    // Annoying boundary condition: cmp of first value is true, but this is actually the edge value.
-    // Seems like we'd be better off with a sliding window like the original chunked buffer
-    // implementation used?
-    if (cmp{}(last_sample_, threshold)) {
-      // ignore starting values that match
-      while (buf < end && cmp{}(buf[0], threshold)) { buf += stride; }
-    }
-    for (; buf < end;) {
-      // find first value that matches
-      bool edge = false;
-      while (!edge && buf < end) {
-        if (cmp{}(buf[0], threshold)) {
-          if (!trigger) trigger = buf;
-          ++edge_count;
-          edge = true;
-        }
-        buf += stride;
+    EdgeDetector edge_detector{threshold, edge_detector_state_};
+    do {
+      edge_detector.Update<cmp>(buf[0]);
+      if (edge_detector.rising_edge()) {
+        if (!first_edge) first_edge = buf;
+        ++edge_count;
       }
-      // TODO Count multiple samples above threshold?
-      // ignore further values that match
-      while (buf < end && cmp{}(buf[0], threshold)) { buf += stride; }
-    }
 
-    last_sample_ = *(end - 1);
+      buf += stride;
+    } while (buf < end);
+
     stats_.sample_count += buffer_length;
     stats_.edge_count = edge_count;
-    if (trigger) {
+    edge_detector_state_ = edge_detector.state();
+
+    if (first_edge) {
       ++stats_.trigger_count;
-      return trigger - buffer;
+      return first_edge - buffer;
     } else {
       return buffer_length;
     }
