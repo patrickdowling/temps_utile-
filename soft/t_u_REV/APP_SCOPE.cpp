@@ -467,7 +467,8 @@ void ScopeApp::RenderScope() const
 
 namespace icons {
 static const uint8_t rising_edge_8x8[] = {0x60, 0x60, 0x60, 0x7f, 0x7f, 0x03, 0x03, 0x03};
-};
+static const uint8_t trigger_indicator_3x8[] = {0x3e, 0x1c, 0x08};
+};  // namespace icons
 
 void ScopeApp::RenderScopeUI() const
 {
@@ -478,22 +479,27 @@ void ScopeApp::RenderScopeUI() const
   graphics.print((char)('1' + current_channel_));
   graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
 
+  static constexpr weegfx::coord_t bottom_text_y = 63 - 8;
+
   if (ui_.xdiv_display.visible()) {
-    graphics.setPrintPos(0, 64 - 8);
+    graphics.setPrintPos(64, bottom_text_y);
     graphics.print(channel.current_timebase().label);
   }
+
+  auto y = 32 - (channel.trigger_level() >> 6) - 3;
+  CONSTRAIN(y, 0, 58);
+  graphics.drawBitmap8(0, y, 3, icons::trigger_indicator_3x8);
+
   if (ui_.ydiv_display.visible()) {
     if (ui_.edit_trigger_level) {
-      graphics.setPrintPos(128 - 5 * weegfx::Graphics::kFixedFontW, 64 - 8);
+      CONSTRAIN(y, 0, bottom_text_y);
+      graphics.setPrintPos(5, y);
       graphics.pretty_print(channel.trigger_level(), 5);
     } else {
-      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, 64 - 8);
+      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, bottom_text_y);
       graphics.printf("x%d", channel.ydiv());
     }
   }
-
-  graphics.drawBitmap8(0, 32 - (channel.trigger_level() >> 6) - 1, TU::kBitmapLoopMarkerW,
-                       TU::bitmap_loop_markers_8);
 
   const uint8_t *icon = nullptr;
   switch (channel.trigger_type()) {
