@@ -115,6 +115,7 @@ static void ADC_DMA_ISR()
   std::fill(adc_dma_buffer, adc_dma_buffer + kDMABufferSize, 0);
 
   adc_.setReference(ADC_REF_3V3);
+  (void)adc_.analogRead(CV1, 0);
 
   dma_channel_mux.begin(true);  // allocate the DMA channel
   dma_channel_adc.begin(true);  // allocate the DMA channel
@@ -139,8 +140,6 @@ static void ADC_DMA_ISR()
   adc_.setConversionSpeed(config.conversion_speed);
   adc_.setSamplingSpeed(config.sampling_speed);
   adc_.setAveraging(config.averaging);
-
-  // (void)adc_.analogRead(CV1, 0);
 }
 
 // DMA/ADC à la

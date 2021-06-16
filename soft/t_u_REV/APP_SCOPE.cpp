@@ -162,7 +162,7 @@ enum ScopeChannelSetting {
   SCOPE_CHANNEL_SETTING_TRIG_TYPE,
   SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
   SCOPE_CHANNEL_SETTING_LAST,
-  SCOPE_CHANNEL_SETTING_FIRST = SCOPE_CHANNEL_SETTING_XOFF
+  SCOPE_CHANNEL_SETTING_FIRST = SCOPE_CHANNEL_SETTING_XOFF,
 };
 
 class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
@@ -274,6 +274,7 @@ private:
   struct {
     bool menu_active = false;
 
+    ScopeChannelSetting edit_setting_l = SCOPE_CHANNEL_SETTING_XDIV;
     ScopeChannelSetting edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
 
     volatile uint32_t trigger_lost = 0;
@@ -413,28 +414,40 @@ size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
 
 void ScopeApp::OnButton(const UI::Event &event)
 {
-  if (UI::EVENT_BUTTON_PRESS == event.type) {
+  if (UI::EVENT_BUTTON_LONG_PRESS == event.type) {
+    if (!ui_.menu_active) {
+      if (TU::CONTROL_BUTTON_DOWN == event.control) ui_.info_overlay.show();
+    }
+    return;
+  }
+
+  if (TU::CONTROL_BUTTON_UP == event.control) {
+    ui_.menu_active = !ui_.menu_active;
+    return;
+  }
+
+  if (ui_.menu_active) {
+    if (TU::CONTROL_BUTTON_R == event.control) { ui_.cursor.toggle_editing(); }
+  } else {
     switch (event.control) {
-      case TU::CONTROL_BUTTON_UP: {
-        ui_.menu_active = !ui_.menu_active;
-      } break;
-      case TU::CONTROL_BUTTON_DOWN: {
-        if (!ui_.menu_active) { ui_.info_overlay.show(); }
+      case TU::CONTROL_BUTTON_DOWN: ui_.info_overlay.show(); break;
+      case TU::CONTROL_BUTTON_L: {
+        ui_.edit_setting_l = SCOPE_CHANNEL_SETTING_XDIV == ui_.edit_setting_l
+                                 ? SCOPE_CHANNEL_SETTING_LAST
+                                 : SCOPE_CHANNEL_SETTING_XDIV;
+        ui_.status_bar.show();
+        ui_.edit_setting.hide();
       } break;
       case TU::CONTROL_BUTTON_R: {
-        if (ui_.menu_active) {
-          ui_.cursor.toggle_editing();
+        if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
+            TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
+          ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
+          ui_.edit_setting.show();
+          ui_.status_bar.hide();
         } else {
-          if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
-              TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
-            ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
-            ui_.edit_setting.show();
-            ui_.status_bar.hide();
-          } else {
-            ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
-            ui_.status_bar.show();
-            ui_.edit_setting.hide();
-          }
+          ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
+          ui_.status_bar.show();
+          ui_.edit_setting.hide();
         }
       } break;
       default: break;
@@ -465,10 +478,26 @@ void ScopeApp::OnEncoder(const UI::Event &event)
 
   } else {
     if (TU::CONTROL_ENCODER_L == event.control) {
-      if (current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value))
-        TU::ADC::StartConversionBuffered(current_channel.timebase().adc_frequency, ADC_CHANNEL_1);
+      bool update_adc = false;
+      switch (ui_.edit_setting_l) {
+        case SCOPE_CHANNEL_SETTING_XDIV:
+          update_adc = current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value);
+          break;
+        case SCOPE_CHANNEL_SETTING_LAST: {
+          auto channel = current_channel_ + event.value;
+          CONSTRAIN(channel, 0, kNumChannels - 1);
+          if (channel != current_channel_) {
+            current_channel_ = channel;
+            update_adc = true;
+          }
+        } break;
+        default: break;
+      }
       ui_.edit_setting.hide();
       ui_.status_bar.show();
+      if (update_adc)
+        TU::ADC::StartConversionBuffered(current_channel.timebase().adc_frequency,
+                                         current_adc_channel());
     } else if (TU::CONTROL_ENCODER_R == event.control) {
       switch (ui_.edit_setting_r) {
         case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
@@ -641,14 +670,13 @@ void ScopeApp::RenderScopeUI() const
     graphics.drawBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
   }
 
-  // On-screen edit overlay?
   if (ui_.edit_setting.visible()) {
+    // On-screen edit overlay?
     CONSTRAIN(trigger_level_y, 0, 56);
     graphics.setPrintPos(6, trigger_level_y);
     graphics.pretty_print(channel.trigger_level(), 5);
-  } else
-      // Bottom [channel][][timebase][scale]
-      if (ui_.status_bar.visible()) {
+  } else if (ui_.status_bar.visible()) {
+    // Bottom [channel][?????][timebase][scale]
     weegfx::coord_t bottom_text_y = 64 - weegfx::Graphics::kFixedFontH;
 
     graphics.clearRect(0, bottom_text_y, 128, 8);
@@ -657,15 +685,27 @@ void ScopeApp::RenderScopeUI() const
     graphics.drawAlignedByte(64, bottom_text_y, 0xaa);
     graphics.drawAlignedByte(96, bottom_text_y, 0xaa);
 
+    bool edit_channel = SCOPE_CHANNEL_SETTING_LAST == ui_.edit_setting_l;
+
     bottom_text_y++;
-    graphics.setPrintPos(0, bottom_text_y);
-    graphics.print("1    ");
-    graphics.invertRect(0, bottom_text_y, weegfx::Graphics::kFixedFontW,
-                        weegfx::Graphics::kFixedFontH + 1);
+    if (edit_channel) {
+      weegfx::coord_t x = 0;
+      for (int c = 0; c < kNumChannels; ++c) {
+        graphics.setPrintPos(x, bottom_text_y);
+        graphics.print((char)('1' + c));
+        x += weegfx::Graphics::kFixedFontW + 1;
+      }
+      graphics.invertRect(current_channel_ * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y,
+                          weegfx::Graphics::kFixedFontW + 1, weegfx::Graphics::kFixedFontH + 1);
+    } else {
+      graphics.setPrintPos(current_channel_ * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y);
+      graphics.print((char)('1' + current_channel_));
+    }
 
     x = 32 + 6;
-    icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.xdiv(),
-                        channel.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
+    if (!edit_channel)
+      icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.xdiv(),
+                          channel.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
     graphics.setPrintPos(x, bottom_text_y);
     graphics.print(channel.timebase().label);
 
@@ -692,7 +732,8 @@ void ScopeApp::RenderScopeUI() const
 
 void ScopeApp::Activate()
 {
-  TU::ADC::StartConversionBuffered(current_channel().timebase().adc_frequency, ADC_CHANNEL_1);
+  TU::ADC::StartConversionBuffered(current_channel().timebase().adc_frequency,
+                                   current_adc_channel());
 }
 
 static ScopeApp scope_app_instance;
