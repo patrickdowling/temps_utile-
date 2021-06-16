@@ -91,6 +91,7 @@ public:
 
   // Print string at current print pos and move print pos
   void print(const char *);
+  void print(const char *, unsigned len);
 
   // Print right-aligned string at current print pos; print pos is unchanged
   void print_right(const char *);

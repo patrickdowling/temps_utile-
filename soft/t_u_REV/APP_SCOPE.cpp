@@ -105,27 +105,40 @@ static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_
     "none", "rising", "falling", "ext1", "ext2",
 };
 
-enum Timebase {
-  TIMEBASE_100,
-  TIMEBASE_200,
-  TIMEBASE_500,
-  TIMEBASE_1000,
-  TIMEBASE_2000,
-  TIMEBASE_LAST
-};
-
 struct TimebaseParameters {
   const char *const label;
   uint32_t adc_frequency;
+  uint32_t decimation;
   // auto gain?
   // retrigger delay
 };
 
-static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
-    {" 100", .adc_frequency = 100 * 128},  {" 200", .adc_frequency = 200 * 128},
-    {" 500", .adc_frequency = 500 * 128},  {"1000", .adc_frequency = 1000 * 128},
-    {"2000", .adc_frequency = 2000 * 128},
+// BEGIN generated via resources/scope_divs.py
+// clang-format off
+enum Timebase {
+  TIMEBASE_2000,
+  TIMEBASE_1000,
+  TIMEBASE_500,
+  TIMEBASE_200,
+  TIMEBASE_100,
+  TIMEBASE_50,
+  TIMEBASE_20,
+  TIMEBASE_10,
+  TIMEBASE_LAST,
 };
+
+static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
+{ .label = "500u", .adc_frequency = 256000 },
+{ .label = "  1m", .adc_frequency = 128000 },
+{ .label = "  2m", .adc_frequency = 64000 },
+{ .label = "  5m", .adc_frequency = 25600 },
+{ .label = " 10m", .adc_frequency = 12800 },
+{ .label = " 20m", .adc_frequency = 6400 },
+{ .label = " 50m", .adc_frequency = 2560 },
+{ .label = "100m", .adc_frequency = 1280 },
+};
+// clang-format on
+// END generated
 
 enum Scaling {
   DIV_0V5,
@@ -767,6 +780,9 @@ const uint8_t edit_indicators_8[3 * 3] = {
     0x60, 0xe0, 0x60,  // max
 };
 
+const uint8_t unit_ms_8[] = {0x78, 0x18, 0x78, 0x00, 0x58, 0x68};
+const uint8_t unit_us_8[] = {0xf8, 0x40, 0x78, 0x00, 0x58, 0x68};
+
 inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
                          const settings::value_attr &attr)
 {
@@ -847,7 +863,12 @@ void ScopeApp::RenderScopeUI() const
       icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.xdiv(),
                           channel.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
     graphics.setPrintPos(x, bottom_text_y);
-    graphics.print(channel.timebase().label);
+    auto label = channel.timebase().label;
+    graphics.print(label, 3);
+    switch (label[3]) {
+      case 'm': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_ms_8); break;
+      case 'u': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_us_8); break;
+    }
 
     x = 96 + 6;
     if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r)

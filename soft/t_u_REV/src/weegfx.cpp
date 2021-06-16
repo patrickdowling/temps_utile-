@@ -547,6 +547,17 @@ void Graphics::print(const char *s) {
   text_x_ = x;
 }
 
+void Graphics::print(const char *s, unsigned len) {
+  coord_t x = text_x_;
+  coord_t y = text_y_;
+  while (*s && len--) {
+    draw_char(*s++, x, y);
+    x += kFixedFontW;
+  }
+
+  text_x_ = x;
+}
+
 void Graphics::print_right(const char *s) {
   weegfx::coord_t x = text_x_;
   weegfx::coord_t y = text_y_;
