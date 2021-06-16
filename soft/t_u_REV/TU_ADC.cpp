@@ -454,7 +454,7 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
 
     uint16_t addr = (uint32_t)read_buffer & 0xffff;
     if (ext_trigger_address >= addr && ext_trigger_address < addr + 2 * kDMAChunkSize)
-      chunk->info.ext_trigger_offset = ext_trigger_address - addr;
+      chunk->info.ext_trigger_offset = (ext_trigger_address - addr) / 2;  // offset in int16_t
     else
       chunk->info.ext_trigger_offset = 0xffff;
     chunk_buffers_.written();

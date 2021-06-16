@@ -446,6 +446,7 @@ private:
 
   void UpdateChannelConfig();
   void ConfigureADC();
+  void ConfigureTR();
 
   static void DrawGrid();
   static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
@@ -500,10 +501,11 @@ void ScopeApp::Init()
 {
   InitDefaults();
   for (auto &channel : channels_) channel.Init();
-  UpdateChannelConfig();
 
   display_frame_buffer_.Init();
   ui_.cursor.Init(SCOPE_APP_SETTING_FREQ_COUNTER, SCOPE_APP_SETTING_LINK34);
+
+  UpdateChannelConfig();
 }
 
 void ScopeApp::Process()
@@ -645,7 +647,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonDown)
   EVENT_DISPATCH_HANDLER_STUB();
 
   auto &channel = selected_channel();
-  channel.change_value_wrap(SCOPE_CHANNEL_SETTING_TRIG_TYPE, 1);
+  if (channel.change_value_wrap(SCOPE_CHANNEL_SETTING_TRIG_TYPE, 1)) ConfigureTR();
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonL)
@@ -695,7 +697,10 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderL)
   }
   ui_.edit_setting.hide();
   ui_.status_bar.show();
-  if (update_adc) ConfigureADC();
+  if (update_adc) {
+    ConfigureADC();
+    ConfigureTR();
+  }
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
@@ -747,6 +752,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderR)
         case SCOPE_APP_SETTING_LINK34:
           UpdateChannelConfig();
           ConfigureADC();
+          ConfigureTR();
           break;
         default: break;
       }
@@ -777,6 +783,15 @@ void ScopeApp::ConfigureADC()
   TU::ADC::StartConversionBuffered(main_channel().timebase().adc_frequency,
                                    channel_config_.main_adc_channel(),
                                    channel_config_.aux_adc_channel());
+}
+
+void ScopeApp::ConfigureTR()
+{
+  auto trigger_type = main_channel().trigger_type();
+  if (TriggerProcessor::TRIGGER_TYPE_EXT1 == trigger_type)
+    TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_1);
+  else if (TriggerProcessor::TRIGGER_TYPE_EXT2 == trigger_type)
+    TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_2);
 }
 
 /*static*/ void ScopeApp::DrawGrid()
@@ -1128,7 +1143,7 @@ void ScopeApp::Activate()
 {
   UpdateChannelConfig();
   ConfigureADC();
-  TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_1);
+  ConfigureTR();
 }
 
 static ScopeApp scope_app_instance;
