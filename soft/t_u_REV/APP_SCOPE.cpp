@@ -303,7 +303,7 @@ private:
   const ScopeChannel &current_channel() const { return channels_[current_channel_]; }
 
   void RenderMenu() const;
-  void RenderDisplayBuffer() const;
+  static void RenderDisplayBuffer(const int16_t *display_buffer, const int32_t multiplier);
   void RenderScopeUI() const;
 
   void UpdateDisplayBuffer();
@@ -478,7 +478,8 @@ void ScopeApp::Render()  // const
   } else {
     UpdateDisplayBuffer();
     RenderGrid();
-    RenderDisplayBuffer();
+    auto display_buffer = current_display_buffer_;
+    if (display_buffer) RenderDisplayBuffer(display_buffer, current_channel().scaling().multiplier);
     RenderScopeUI();
   }
 }
@@ -486,7 +487,8 @@ void ScopeApp::Render()  // const
 void ScopeApp::RenderScreensaver()  // const
 {
   UpdateDisplayBuffer();
-  RenderDisplayBuffer();
+  auto display_buffer = current_display_buffer_;
+  if (display_buffer) RenderDisplayBuffer(display_buffer, current_channel().scaling().multiplier);
 }
 
 void ScopeApp::EventScreensaverOff()
@@ -532,22 +534,25 @@ void ScopeApp::RenderMenu() const
   }
 }
 
-void ScopeApp::RenderDisplayBuffer() const
+static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
 {
-  auto &channel = current_channel();
+  auto px = 32 - ((multiplier * value) >> (kScalingShift + 6));
+  CONSTRAIN(px, 0, 63);
+  return px;
+}
 
-  auto display_buffer = current_display_buffer_;
-  if (display_buffer) {
-    auto multiplier = channel.scaling().multiplier;
-    auto y1 = 32 - ((multiplier * display_buffer[0]) >> (kScalingShift + 6));
-    CONSTRAIN(y1, 0, 63);
-    for (weegfx::coord_t x = 0; x < kDisplayBufferSize - 1; ++x) {
-      auto y2 = 32 - ((multiplier * display_buffer[x]) >> (kScalingShift + 6));
-      CONSTRAIN(y2, 0, 63);
+/*static*/ void ScopeApp::RenderDisplayBuffer(const int16_t *display_buffer,
+                                              const int32_t multiplier)
+{
+  auto end = display_buffer + kDisplayBufferSize;
 
-      graphics.drawLine(x, y1, x + 1, y2);
-      y1 = y2;
-    }
+  weegfx::coord_t x = 0;
+  auto y1 = to_pixel(*display_buffer++, multiplier);
+  while (display_buffer < end) {
+    auto y2 = to_pixel(*display_buffer++, multiplier);
+    graphics.drawLine(x, y1, x + 1, y2);
+    y1 = y2;
+    ++x;
   }
 }
 
