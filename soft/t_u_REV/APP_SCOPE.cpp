@@ -397,17 +397,15 @@ private:
   // The channel configuration is packed into an int so access within ISR is atomic.
   // We're relying on the fact that channel index = ADC channel
   // Still tempted to just use a union, even if technically UB.
-  // Still tempted to just use a union, even if technically UB.
   struct ChannelConfig {
     constexpr ChannelConfig() : packed_value{Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST)} {}
-    ChannelConfig(ADC_CHANNEL main) : packed_value{Pack(main, ADC_CHANNEL_LAST)} {}
-    ChannelConfig(ADC_CHANNEL main, ADC_CHANNEL aux) : packed_value{Pack(main, aux)} {}
+    constexpr ChannelConfig(ADC_CHANNEL main, ADC_CHANNEL aux) : packed_value{Pack(main, aux)} {}
 
     int main() const { return packed_value & 0xffff; }
     int aux() const { return packed_value >> 16; }
 
-    ADC_CHANNEL main_adc_channel() const { return static_cast<ADC_CHANNEL>(packed_value & 0xffff); }
-    ADC_CHANNEL aux_adc_channel() const { return static_cast<ADC_CHANNEL>((packed_value >> 16)); }
+    ADC_CHANNEL main_adc_channel() const { return static_cast<ADC_CHANNEL>(main()); }
+    ADC_CHANNEL aux_adc_channel() const { return static_cast<ADC_CHANNEL>(aux()); }
 
     bool linked() const { return ADC_CHANNEL_LAST != aux_adc_channel(); }
 
@@ -448,7 +446,7 @@ private:
   void ConfigureADC();
   void ConfigureTR();
 
-  static void DrawGrid();
+  static void DrawGraticule();
   static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
                            const weegfx::coord_t y);
   void RenderDisplayBuffer() const;
@@ -510,8 +508,8 @@ void ScopeApp::Init()
 
 void ScopeApp::Process()
 {
-  // const auto channel_config = channel_config_;
   uint32_t trigger_lost = ui_.trigger_lost;
+  if (trigger_lost) --trigger_lost;
 
   auto &adc_chunks = TU::ADC::chunk_buffers();
   while (adc_chunks.readable()) {
@@ -519,9 +517,12 @@ void ScopeApp::Process()
 
     auto adc_chunk = adc_chunks.readable_frame();
 
+    const auto channel_config = channel_config_;
     // Process input buffer; if already triggered we don't really need to find a new one yet but
     // this might handle more than just triggers eventually
-    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk);
+    auto &channel = channels_[channel_config.main()];
+    auto trigger = channel_config.linked() ? channel.Process<kADCChunkSize, 2>(adc_chunk)
+                                           : channel.Process<kADCChunkSize, 1>(adc_chunk);
 
     auto sample_writer = sample_buffer_.writer();
 #if 0
@@ -545,7 +546,7 @@ void ScopeApp::Process()
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
-        trigger_state_.holdoff = main_channel().trigger_holdoff();
+        trigger_state_.holdoff = channel.trigger_holdoff();
         read_length = kDisplayFrameSize;
       }
     } else {
@@ -573,7 +574,6 @@ void ScopeApp::Process()
   }
 
   // Other regular book-keeping?
-  if (trigger_lost) --trigger_lost;
   ui_.trigger_lost = trigger_lost;
 }
 
@@ -681,11 +681,10 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderL)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  auto &channel = selected_channel();
   bool update_adc = false;
   switch (ui_.edit_setting_l) {
     case SCOPE_CHANNEL_SETTING_XDIV:
-      update_adc = channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event_value);
+      update_adc = main_channel().change_value(SCOPE_CHANNEL_SETTING_XDIV, event_value);
       break;
     case SCOPE_CHANNEL_SETTING_LAST:
       if (change_value(SCOPE_APP_SETTING_CHANNEL, event_value)) {
@@ -707,16 +706,14 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  // TODO handle linked channels
-
-  auto &channel = selected_channel();
   switch (ui_.edit_setting_r) {
     case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
-      channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event_value * 32);
+      main_channel().change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event_value * 32);
       ui_.edit_setting.show();
       ui_.status_bar.hide();
       break;
-    case SCOPE_CHANNEL_SETTING_YDIV: channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event_value);
+    case SCOPE_CHANNEL_SETTING_YDIV:
+      selected_channel().change_value(SCOPE_CHANNEL_SETTING_YDIV, event_value);
     default: ui_.status_bar.show(); break;
   }
 }
@@ -794,19 +791,22 @@ void ScopeApp::ConfigureTR()
     TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_2);
 }
 
-/*static*/ void ScopeApp::DrawGrid()
+/*static*/ void ScopeApp::DrawGraticule()
 {
-  graphics.drawVLinePattern(16, 0, 64, 0x88);
-  graphics.drawVLinePattern(32, 0, 64, 0x88);
-  graphics.drawVLinePattern(48, 0, 64, 0x88);
-  graphics.drawVLinePattern(64, 0, 64, 0xaa);
-  graphics.drawVLinePattern(80, 0, 64, 0x88);
-  graphics.drawVLinePattern(96, 0, 64, 0x88);
-  graphics.drawVLinePattern(112, 0, 64, 0x88);
+  static constexpr uint8_t kVLinePattern = 0x11;
+  static constexpr uint8_t kHlinePattern = 4;
 
-  graphics.drawHLinePattern(0, 16, 128, 4);
+  graphics.drawVLinePattern(16, 0, 64, kVLinePattern);
+  graphics.drawVLinePattern(32, 0, 64, kVLinePattern);
+  graphics.drawVLinePattern(48, 0, 64, kVLinePattern);
+  graphics.drawVLinePattern(64, 0, 64, 0x55);
+  graphics.drawVLinePattern(80, 0, 64, kVLinePattern);
+  graphics.drawVLinePattern(96, 0, 64, kVLinePattern);
+  graphics.drawVLinePattern(112, 0, 64, kVLinePattern);
+
+  graphics.drawHLinePattern(0, 16, 128, kHlinePattern);
   graphics.drawHLinePattern(0, 32, 128, 2);
-  graphics.drawHLinePattern(0, 48, 128, 4);
+  graphics.drawHLinePattern(0, 48, 128, kHlinePattern);
 }
 
 void ScopeApp::Render()  // const
@@ -815,7 +815,7 @@ void ScopeApp::Render()  // const
     RenderMenu();
   } else {
     UpdateDisplayBuffer();
-    DrawGrid();
+    DrawGraticule();
     RenderDisplayBuffer();
     RenderScopeUI();
   }
