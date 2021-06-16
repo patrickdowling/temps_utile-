@@ -65,10 +65,12 @@ public:
     TRIGGER_TYPE_LAST
   };
 
+  using TriggerOffset = size_t;
+
   template <size_t buffer_length, int stride>
-  const int16_t *Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
+  const TriggerOffset Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
   {
-    using Impl = const int16_t *(TriggerProcessor::*)(int16_t, const int16_t *);
+    using Impl = TriggerOffset (TriggerProcessor::*)(int16_t, const int16_t *);
     static constexpr Impl processors[TRIGGER_TYPE_LAST] = {
         &TriggerProcessor::Nop<buffer_length>,
         &TriggerProcessor::FindEdges<buffer_length, stride, std::greater<int16_t>>,  // rising
@@ -76,15 +78,12 @@ public:
         &TriggerProcessor::Nop<buffer_length>,
         &TriggerProcessor::Nop<buffer_length>,
     };
-    auto trigger = (this->*processors[trigger_type])(threshold, buffer);
-    if (trigger) ++stats_.trigger_count;
-    return trigger;
+    return (this->*processors[trigger_type])(threshold, buffer);
   }
 
   struct Stats {
     uint32_t sample_count{0};
     uint32_t trigger_count{0};
-    uint32_t last_edge{0};
     uint32_t edge_count{0};
   };
 
@@ -98,45 +97,56 @@ public:
 
 private:
   Stats stats_;
+  int16_t last_sample_{0};
 
   template <size_t buffer_length>
-  const int16_t *Nop(int16_t, const int16_t *buffer)
+  TriggerOffset Nop(int16_t, const int16_t *buffer)
   {
     stats_.sample_count += buffer_length;
-    return nullptr;
+    last_sample_ = buffer[buffer_length - 1];
+    return buffer_length;
   }
 
   template <size_t buffer_length, int stride, typename cmp>
-  const int16_t *FindEdges(int16_t threshold, const int16_t *buffer)
+  TriggerOffset FindEdges(int16_t threshold, const int16_t *buffer)
   {
-    auto sample_count = stats_.sample_count;
-    auto last_edge = stats_.last_edge;
-
+    auto buf = buffer;
     auto end = buffer + buffer_length;
+    auto edge_count = stats_.edge_count;
     const int16_t *trigger = nullptr;
-    for (; buffer < end;) {
+
+    // Annoying boundary condition: cmp of first value is true, but this is actually the edge value.
+    // Seems like we'd be better off with a sliding window like the original chunked buffer
+    // implementation used?
+    if (cmp{}(last_sample_, threshold)) {
       // ignore starting values that match
-      while (buffer < end && cmp{}(buffer[0], threshold)) {
-        buffer += stride;
-        ++sample_count;
-      }
+      while (buf < end && cmp{}(buf[0], threshold)) { buf += stride; }
+    }
+    for (; buf < end;) {
       // find first value that matches
       bool edge = false;
-      while (!edge && buffer < end) {
-        if (cmp{}(buffer[0], threshold)) {
-          if (!trigger) trigger = buffer;
-          ++stats_.edge_count;
-          last_edge = sample_count;
+      while (!edge && buf < end) {
+        if (cmp{}(buf[0], threshold)) {
+          if (!trigger) trigger = buf;
+          ++edge_count;
           edge = true;
         }
-        buffer += stride;
-        ++sample_count;
+        buf += stride;
       }
+      // TODO Count multiple samples above threshold?
+      // ignore further values that match
+      while (buf < end && cmp{}(buf[0], threshold)) { buf += stride; }
     }
 
-    stats_.sample_count = sample_count;
-    stats_.last_edge = last_edge;
-    return trigger;
+    last_sample_ = *(end - 1);
+    stats_.sample_count += buffer_length;
+    stats_.edge_count = edge_count;
+    if (trigger) {
+      ++stats_.trigger_count;
+      return trigger - buffer;
+    } else {
+      return buffer_length;
+    }
   }
 };
 
@@ -224,7 +234,7 @@ public:
   void Init();
 
   template <size_t buffer_length, int stride>
-  const int16_t *Process(const int16_t *buffer)
+  TriggerProcessor::TriggerOffset Process(const int16_t *buffer)
   {
     auto trigger =
         trigger_processor_.Process<buffer_length, stride>(trigger_type(), trigger_level(), buffer);
@@ -350,7 +360,7 @@ private:
 
   struct {
     bool triggered = false;
-    int rearm = 0;
+    int holdoff = 0;
   } trigger_state_;
 
   struct ChannelConfig {
@@ -371,9 +381,7 @@ private:
   ScopeChannel channels_[kNumChannels];
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 8>;
-  using DisplayBuffers = FrameBuffer<kDisplayBufferSize, 2, int16_t>;
-
-  static int16_t adc_chunk_buffer_[kADCChunkSize];
+  using DisplayBuffers = util::FrameBuffer<kDisplayBufferSize, 2, int16_t>;
 
   static CircularSampleBuffer sample_buffer_;
   static DisplayBuffers display_buffers_;
@@ -424,7 +432,6 @@ private:
   EVENT_DISPATCH_DECLARE_HANDLER(menuEncoderR);
 };
 
-/*static*/ int16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
 /*static*/ ScopeApp::DisplayBuffers ScopeApp::display_buffers_ __attribute__((aligned(4)));
 
@@ -452,12 +459,15 @@ void ScopeApp::Process()
   // const auto channel_config = channel_config_;
   uint32_t trigger_lost = ui_.trigger_lost;
 
-  if (TU::ADC::ReadChunk(adc_chunk_buffer_)) {
+  auto &adc_chunks = TU::ADC::chunk_buffers();
+  while (adc_chunks.readable()) {
     debug::ScopedCycleMeasurement cycles{process_cycles};
+
+    auto adc_chunk_buffer = adc_chunks.readable_frame();
 
     // Process input buffer; if already triggered we don't really need to find a new one yet but
     // this might handle more than just triggers eventually
-    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer_);
+    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer);
 
     auto sample_writer = sample_buffer_.writer();
 #if 0
@@ -467,9 +477,10 @@ void ScopeApp::Process()
     // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
 #else
     // TODO without decimation, this step is somewhat moot
-    for (auto src = adc_chunk_buffer_, end = src + kADCChunkSize; src < end; ++src)
+    for (auto src = adc_chunk_buffer, end = src + kADCChunkSize; src < end; ++src)
       *sample_writer++ = *src;
 #endif
+    adc_chunks.read();
     sample_writer.Commit();
 
     // Trigger/display buffer handling
@@ -478,20 +489,21 @@ void ScopeApp::Process()
     if (trigger_state_.triggered) {
       if (sample_buffer_.available() < kDisplayBufferSize) {
         // still accumulating
+        read_length = 0;
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
-        trigger_state_.rearm = 8;
+        trigger_state_.holdoff = 16;
       }
     } else {
-      if (trigger_state_.rearm) {
-        --trigger_state_.rearm;
+      if (trigger_state_.holdoff) {
+        --trigger_state_.holdoff;
         read_length = 0;
         sample_buffer_.Consume();
       } else {
-        if (trigger) {
+        if (trigger < kADCChunkSize) {
           trigger_state_.triggered = true;
-          auto n = kADCChunkSize - (trigger - adc_chunk_buffer_);
+          auto n = kADCChunkSize - trigger;
           sample_buffer_.SetReadPos(-n - kDisplayBufferSize / 2);
           read_length = 0;  // kDisplayBufferSize / 2;
         } else {

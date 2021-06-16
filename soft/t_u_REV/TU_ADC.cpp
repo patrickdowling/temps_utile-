@@ -76,11 +76,13 @@ static constexpr ADC::Config kConfigBuffered = {
 /*static*/ ADC::CalibrationData* ADC::calibration_data_ = nullptr;
 /*static*/ ADC::ADC_MODE ADC::mode_ = ADC::ADC_MODE_INVALID;
 /*static*/ ::ADC ADC::adc_;
-/*static*/ size_t ADC::last_chunk_ = 0xffffffff;
-/*static*/ uint32_t ADC::packed_offsets_ = 0;
 
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_LAST];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_LAST];
+
+/*static*/ uint32_t ADC::packed_offsets_ = 0;
+/*static*/ ADC::ChunkBuffers ADC::chunk_buffers_;
+/*static*/ volatile uint32_t ADC::dma_overflow_ = 0;
 
 // below: channel ids for the ADCx_SCA register: we have 4 inputs
 // CV1 (17) = A3 = 0x49; CV2 (20) = A6 = 0x46; CV3 (19) = A5 = 0x4C; CV4 (18) = A4 = 0x4D
@@ -99,15 +101,19 @@ static DMAChannel dma_channel_adc{false};  // ADC0_RA -> buffer
 static DMASetting dma_settings_normal[2];
 static DMASetting dma_settings_buffered[2];
 
+static void FASTRUN ADC_DMA_ISR()
+{
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
 #define TU_ADC_DEBUG_PIN 12
-static void ADC_DMA_ISR()
-{
   digitalWriteFast(TU_ADC_DEBUG_PIN, HIGH);
-  dma_channel_adc.clearInterrupt();
-  digitalWriteFast(TU_ADC_DEBUG_PIN, LOW);
-}
 #endif
+  dma_channel_adc.clearInterrupt();
+  ADC::BufferedModeISR();
+
+#ifdef TU_ADC_ENABLE_DEBUG_ISR
+  digitalWriteFast(TU_ADC_DEBUG_PIN, LOW);
+#endif
+}
 
 /*static*/ void ADC::Init(CalibrationData* calibration_data)
 {
@@ -125,8 +131,7 @@ static void ADC_DMA_ISR()
   ADC_SERIAL_PRINTLN("dma_channel_adc.channel=%x", dma_channel_adc.channel);
 
   dma_channel_adc.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
-#ifdef TU_ADC_ENABLE_DEBUG_ISR
-  dma_channel_adc.attachInterrupt(ADC_DMA_ISR);
+#ifdef TU_ADC_DEBUG_PIN
   pinMode(TU_ADC_DEBUG_PIN, OUTPUT);
 #endif
 
@@ -172,7 +177,7 @@ static void ADC_DMA_ISR()
   tcd->CSR = DMA_TCD_CSR_MAJORELINK | DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel);
   tcd->CSR |= DMA_TCD_CSR_DREQ;
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
-  tcd->CSR |= DMA_TCD_CSR_INTMAJOR;
+  // tcd->CSR |= DMA_TCD_CSR_INTMAJOR; // TODO ISR not normally enabled for this mode
 #endif
   tcd->DLASTSGA = -(2 * buffer_size);
 }
@@ -193,6 +198,8 @@ static void ADC_DMA_ISR()
 
 /*static*/ void ADC::InitDMASettingsBuffered()
 {
+  chunk_buffers_.Init();
+
   unsigned int num_channels = 1;
   unsigned int num_samples = kDMABufferSize;
 
@@ -212,9 +219,7 @@ static void ADC_DMA_ISR()
   tcd->CITER = tcd->BITER = num_samples | DMA_TCD_BITER_ELINKYES_LINKCH(dma_channel_mux.channel) |
                             DMA_TCD_BITER_ELINKYES_ELINK;
   tcd->CSR = DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel) | DMA_TCD_CSR_MAJORELINK;
-#ifdef TU_ADC_ENABLE_DEBUG_ISR
   tcd->CSR |= DMA_TCD_CSR_INTHALF | DMA_TCD_CSR_INTMAJOR;
-#endif
   tcd->DLASTSGA = -(2 * num_samples);
 }
 
@@ -238,18 +243,22 @@ static void ADC_DMA_ISR()
   }
   dma_settings_buffered[0].sourceBuffer(adc_mux_buffer, 2 * num_channels);
 
-  StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
-  StartPDB(freq);
-
   auto offset1 = channel_offset(channel1);
   auto offset2 = num_channels > 1 ? channel_offset(channel2) : offset1;
   packed_offsets_ = __PKHBT(offset1, offset2, 16);
+
+  dma_overflow_ = 0;
+  dma_channel_adc.attachInterrupt(ADC_DMA_ISR);
+  StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
+  StartPDB(freq);
 }
 
 /*static*/ void ADC::StopDMA()
 {
   if (ADC_MODE_INVALID != mode_) {
     ADC_SERIAL_PRINTLN("StopDMA (mode=%x)", mode_);
+    dma_channel_adc.detachInterrupt();
+    dma_channel_adc.clearInterrupt();
     adc_.disableDMA();
     dma_channel_mux.disable();
     dma_channel_adc.disable();
@@ -389,42 +398,29 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
 
       dma_channel_adc.enable();  // disableOnCompletion -> need to restart
     }
-  } else {
-    auto src = adc_dma_buffer;  // + kDMAChunkSize;
-    update<ADC_CHANNEL_1>((src[0] + src[1] + src[2] + src[3]) >> 2);
   }
 }
 
-/*static*/ size_t ADC::ReadChunkRaw(uint16_t* buffer)
+/*static*/ void FASTRUN ADC::BufferedModeISR()
 {
-  auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
-  auto chunk =
-      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) % kDMAMaxChunkCount;
-  if (chunk != last_chunk_) {
-    memcpy(buffer, adc_dma_buffer + chunk * kDMAChunkSize, kDMAChunkSize * 2);
-    last_chunk_ = chunk;
-    return kDMAChunkSize;
+  if (chunk_buffers_.writeable()) {
+    ReadChunk(chunk_buffers_.writeable_frame());
+    chunk_buffers_.written();
   } else {
-    return 0;
+    dma_overflow_++;
   }
 }
 
-/*static*/ size_t ADC::ReadChunk(int16_t* buffer)
+/*static*/ void ADC::ReadChunk(int16_t* buffer)
 {
   auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
   auto chunk =
-      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) % kDMAMaxChunkCount;
-  if (chunk != last_chunk_) {
-    auto src_buffer = adc_dma_buffer + chunk * kDMAChunkSize;
-    auto src = (const uint32_t*)src_buffer;
-    auto end = (const uint32_t*)(src_buffer + kDMAChunkSize);
-    auto dst = (uint32_t*)buffer;
-    while (src < end) { *dst++ = __SSUB16(packed_offsets_, *src++); }
-    last_chunk_ = chunk;
-    return kDMAChunkSize;
-  } else {
-    return 0;
-  }
+      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAChunkCount / 2) % kDMAChunkCount;
+  auto src_buffer = adc_dma_buffer + chunk * kDMAChunkSize;
+  auto src = (const uint32_t*)src_buffer;
+  auto end = (const uint32_t*)(src_buffer + kDMAChunkSize);
+  auto dst = (uint32_t*)buffer;
+  while (src < end) { *dst++ = __SSUB16(packed_offsets_, *src++); }
 }
 
 /*static*/ volatile void* ADC::DEBUG_DADDR()

@@ -81,13 +81,8 @@ static void debug_menu_adc() {
     graphics.printf("CV4 %5d %5u", ADC::value<ADC_CHANNEL_4>(), ADC::raw_value(ADC_CHANNEL_4));
   } else if (ADC::ADC_MODE_BUFFERED == ADC::mode()) {
     graphics.printf("DADDR %p", ADC::DEBUG_DADDR());
-    // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
-    // graphics.setPrintPos(2, 22);
-    // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
-    // graphics.setPrintPos(2, 32);
-    // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
-    // graphics.setPrintPos(2, 42);
-    // graphics.printf("CV1 %5u", ADC::raw(ADC_CHANNEL_1));
+    graphics.setPrintPos(2, 32);
+    graphics.printf("OFL   %08x", ADC::DEBUG_dma_overflow());
   }
 
   graphics.setPrintPos(2, 52);

@@ -31,6 +31,7 @@
 
 #include "TU_config.h"
 #include "src/ADC/OC_util_ADC.h"
+#include "src/framebuffer.h"
 
 enum ADC_CHANNEL {
   ADC_CHANNEL_1,
@@ -59,13 +60,18 @@ namespace TU {
 //
 // ADC_MODE_BUFFERED
 // This mode was implemented for the 'scope app, and just runs a continuous double/quad buffered DMA
-// acquisition, with the app grabbing chunks. The expectation is that any ReadChunk calls will be
-// more frequent than the buffer wraps around. This mode also provides a way to change the timing.
+// acquisition, with the app grabbing chunks. The expectation is that reading will be more frequent
+// than the buffers get filled. This mode also provides a way to change the timing.
 class ADC {
 public:
+  // DMA buffers (mainly for buffered mode, but shared with normal mode)
   static constexpr size_t kDMAChunkSize = 128;
-  static constexpr size_t kDMAMaxChunkCount = 2;
-  static constexpr size_t kDMABufferSize = kDMAChunkSize * kDMAMaxChunkCount;
+  static constexpr size_t kDMAChunkCount = 2;
+  static constexpr size_t kDMABufferSize = kDMAChunkSize * kDMAChunkCount;
+
+  // Buffered mode buffers
+  static constexpr size_t kChunkBufferCount = 4;
+  using ChunkBuffers = util::FrameBuffer<kDMAChunkSize, kChunkBufferCount, int16_t>;
 
   enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_BUFFERED };
 
@@ -93,12 +99,9 @@ public:
   static ADC_MODE mode() { return mode_; }
 
   // BUFFERED_MODE
+  static ChunkBuffers &chunk_buffers() { return chunk_buffers_; }
 
-  // Read chunk of data
-  static size_t ReadChunkRaw(uint16_t *buffer);
-
-  // Read chunk of data, applying internal offset
-  static size_t ReadChunk(int16_t *buffer);
+  static void BufferedModeISR();
 
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
@@ -145,6 +148,7 @@ public:
 
   // DEBUG
   static volatile void *DEBUG_DADDR();
+  static uint32_t DEBUG_dma_overflow() { return dma_overflow_; }
 
 private:
   template <ADC_CHANNEL channel>
@@ -161,11 +165,14 @@ private:
   static ADC_MODE mode_;
   static ::ADC adc_;
 
-  static size_t last_chunk_;
-  static uint32_t packed_offsets_;  // for buffered mode
-
+  // Normal mode
   static uint32_t raw_[ADC_CHANNEL_LAST];
   static uint32_t smoothed_[ADC_CHANNEL_LAST];
+
+  // Buffered mode
+  static uint32_t packed_offsets_;
+  static ChunkBuffers chunk_buffers_;
+  static volatile uint32_t dma_overflow_;
 
   static void Configure(const Config &config);
 
@@ -175,6 +182,9 @@ private:
   static void StopDMA();
   static void StartPDB(uint32_t freq);
   static void StopPDB();
+
+  // Read chunk of data, applying internal offset
+  static void ReadChunk(int16_t *buffer);
 
   // Deprecated?
 public:

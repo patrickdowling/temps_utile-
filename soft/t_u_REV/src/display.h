@@ -30,7 +30,7 @@
 
 namespace display {
 
-extern FrameBuffer<SH1106_128x64_Driver::kFrameSize, 2> frame_buffer;
+extern util::FrameBuffer<SH1106_128x64_Driver::kFrameSize, 2> frame_buffer;
 extern PagedDisplayDriver<SH1106_128x64_Driver> driver;
 
 void Init();

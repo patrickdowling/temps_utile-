@@ -3,6 +3,8 @@
 
 #include "../util/util_macros.h"
 
+namespace util {
+
 // - This could be specialized for frames == 2 (i.e. double-buffer)
 // - Takes some short-cuts so assumes correct order of calls
 
@@ -52,4 +54,5 @@ private:
   DISALLOW_COPY_AND_ASSIGN(FrameBuffer);
 };
 
+}  // namespace util
 #endif  // DRIVERS_FRAMEBUFFER_H_
