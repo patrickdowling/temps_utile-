@@ -250,7 +250,14 @@ void ScopeChannel::UpdateEnabledSettings()
   num_enabled_settings_ = settings - enabled_settings_;
 }
 
-class ScopeApp : public UI::EventDispatcher<ScopeApp> {
+enum ScopeAppSetting {
+  SCOPE_APP_SETTING_CHANNEL,
+  SCOPE_APP_SETTING_RESET,  // dummy
+  SCOPE_APP_SETTING_LAST
+};
+
+class ScopeApp : public settings::SettingsBase<ScopeApp, SCOPE_APP_SETTING_LAST>,
+                 public UI::EventDispatcher<ScopeApp> {
 public:
   static constexpr int kNumChannels = 4;
 
@@ -258,8 +265,8 @@ public:
   void Process();
   void UpdateUI();
 
-  size_t Save(util::StreamBufferWriter &stream_buffer) const;
-  size_t Restore(util::StreamBufferReader &stream_buffer);
+  size_t SaveState(util::StreamBufferWriter &stream_buffer) const;
+  size_t RestoreState(util::StreamBufferReader &stream_buffer);
 
   void Render();             // const;
   void RenderScreensaver();  // const;
@@ -281,13 +288,11 @@ private:
     util::PopupElement info_overlay;
 
     menu::ScreenCursor<menu::kScreenLines> cursor;
-
   } ui_;
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
   using DisplayBuffers = FrameBuffer<kDisplayBufferSize, 2, int16_t>;
 
-  int current_channel_{0};
   const int16_t *current_display_buffer_ = nullptr;
 
   static uint16_t adc_chunk_buffer_[kADCChunkSize];
@@ -296,10 +301,18 @@ private:
 
   ScopeChannel channels_[kNumChannels];
 
-  ADC_CHANNEL current_adc_channel() const { return static_cast<ADC_CHANNEL>(current_channel_); }
+  int current_channel_index() const { return get_value(SCOPE_APP_SETTING_CHANNEL); }
 
-  ScopeChannel &current_channel() { return channels_[current_channel_]; }
-  const ScopeChannel &current_channel() const { return channels_[current_channel_]; }
+  ADC_CHANNEL current_adc_channel() const
+  {
+    return static_cast<ADC_CHANNEL>(current_channel_index());
+  }
+
+  ScopeChannel &current_channel() { return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)]; }
+  const ScopeChannel &current_channel() const
+  {
+    return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)];
+  }
 
   static void RenderGrid();
   static void RenderDisplayBuffer(const int16_t *display_buffer, const int32_t multiplier);
@@ -335,8 +348,16 @@ private:
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
 /*static*/ ScopeApp::DisplayBuffers ScopeApp::display_buffers_ __attribute__((aligned(4)));
 
+SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
+    // default, min, max, name, value_names, storage_type, parent_index, parent_value
+    {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
+    {0, 0, 1, "Reset", nullptr, settings::STORAGE_TYPE_NOP},
+};
+
 void ScopeApp::Init()
 {
+  InitDefaults();
+
   for (auto &channel : channels_) channel.Init();
   display_buffers_.Init();
 
@@ -401,17 +422,17 @@ void ScopeApp::UpdateUI()
   ui_.info_overlay.Tick(ticks);
 }
 
-size_t ScopeApp::Save(util::StreamBufferWriter &stream_buffer) const
+size_t ScopeApp::SaveState(util::StreamBufferWriter &stream_buffer) const
 {
-  stream_buffer.Write(current_channel_);
+  Save(stream_buffer);
   for (auto &channel : channels_) channel.Save(stream_buffer);
 
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
 
-size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
+size_t ScopeApp::RestoreState(util::StreamBufferReader &stream_buffer)
 {
-  stream_buffer.Read(current_channel_);
+  Restore(stream_buffer);
   for (auto &channel : channels_) channel.Restore(stream_buffer);
 
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
@@ -502,14 +523,9 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderL)
     case SCOPE_CHANNEL_SETTING_XDIV:
       update_adc = channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event_value);
       break;
-    case SCOPE_CHANNEL_SETTING_LAST: {
-      auto channel = current_channel_ + event_value;
-      CONSTRAIN(channel, 0, kNumChannels - 1);
-      if (channel != current_channel_) {
-        current_channel_ = channel;
-        update_adc = true;
-      }
-    } break;
+    case SCOPE_CHANNEL_SETTING_LAST:
+      update_adc = change_value(SCOPE_APP_SETTING_CHANNEL, event_value);
+      break;
     default: break;
   }
   ui_.edit_setting.hide();
@@ -624,7 +640,7 @@ void ScopeApp::RenderMenu() const
     menu::QuadTitleBar::SetColumn(i);
     graphics.print((char)('1' + i));
   }
-  menu::QuadTitleBar::Selected(current_channel_);
+  menu::QuadTitleBar::Selected(current_channel_index());
 
   auto &channel = current_channel();
   menu::SettingsList<menu::kScreenLines, 0, menu::kDefaultValueX> settings_list{ui_.cursor};
@@ -713,10 +729,11 @@ void ScopeApp::RenderScopeUI() const
 {
   namespace DEBUG = TU::DEBUG;
   auto &channel = current_channel();
+  auto channel_index = current_channel_index();
 
   // Top [channel] .... [trigger]
   if (!ui_.status_bar.visible()) {
-    graphics.drawBitmap8(3, 0, 8, icons::channels[current_channel_]);
+    graphics.drawBitmap8(3, 0, 8, icons::channels[channel_index]);
     graphics.drawHLine(3, 8, 8);
   }
 
@@ -763,11 +780,11 @@ void ScopeApp::RenderScopeUI() const
         graphics.print((char)('1' + c));
         x += weegfx::Graphics::kFixedFontW + 1;
       }
-      graphics.invertRect(current_channel_ * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y,
+      graphics.invertRect(channel_index * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y,
                           weegfx::Graphics::kFixedFontW + 1, weegfx::Graphics::kFixedFontH + 1);
     } else {
-      graphics.setPrintPos(current_channel_ * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y);
-      graphics.print((char)('1' + current_channel_));
+      graphics.setPrintPos(channel_index * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y);
+      graphics.print((char)('1' + channel_index));
     }
 
     x = 32 + 6;
@@ -815,17 +832,18 @@ void SCOPE_init()
 
 size_t SCOPE_storageSize()
 {
-  return sizeof(int) + scope::ScopeApp::kNumChannels * scope::ScopeChannel::storageSize();
+  return scope::ScopeApp::storageSize() +
+         scope::ScopeApp::kNumChannels * scope::ScopeChannel::storageSize();
 }
 
 size_t SCOPE_save(util::StreamBufferWriter &stream)
 {
-  return scope::scope_app_instance.Save(stream);
+  return scope::scope_app_instance.SaveState(stream);
 }
 
 size_t SCOPE_restore(util::StreamBufferReader &stream)
 {
-  return scope::scope_app_instance.Restore(stream);
+  return scope::scope_app_instance.RestoreState(stream);
 }
 
 void SCOPE_reset()
