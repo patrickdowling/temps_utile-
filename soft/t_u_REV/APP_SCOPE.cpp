@@ -55,7 +55,8 @@ public:
     TRIGGER_TYPE_NONE,
     TRIGGER_TYPE_RISING,
     TRIGGER_TYPE_FALLING,
-    TRIGGER_TYPE_EXT,
+    TRIGGER_TYPE_EXT1,
+    TRIGGER_TYPE_EXT2,
     TRIGGER_TYPE_LAST
   };
 
@@ -67,6 +68,7 @@ public:
         Nop<buffer_length>,
         FindEdge<buffer_length, std::greater<int16_t>>,  // rising
         FindEdge<buffer_length, std::less<int16_t>>,     // falling
+        Nop<buffer_length>,
         Nop<buffer_length>,
     };
     return processors[trigger_type](threshold, buffer);
@@ -95,10 +97,7 @@ private:
 };
 
 static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_LAST] = {
-    "none",
-    "rising",
-    "falling",
-    "ext",
+    "none", "rising", "falling", "ext1", "ext2",
 };
 
 enum TimebaseDivision {
@@ -203,7 +202,8 @@ void ScopeChannel::UpdateEnabledSettings()
   *settings++ = SCOPE_CHANNEL_SETTING_TRIG_TYPE;
   switch (trigger_type()) {
     case TriggerProcessor::TRIGGER_TYPE_NONE:
-    case TriggerProcessor::TRIGGER_TYPE_EXT: break;
+    case TriggerProcessor::TRIGGER_TYPE_EXT1:
+    case TriggerProcessor::TRIGGER_TYPE_EXT2: break;
     default: *settings++ = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
   }
   *settings++ = SCOPE_CHANNEL_SETTING_XOFF;
@@ -489,8 +489,32 @@ void ScopeApp::RenderScope() const
 }
 
 namespace icons {
-static const uint8_t rising_edge_8x8[] = {0x60, 0x60, 0x60, 0x7f, 0x7f, 0x03, 0x03, 0x03};
-static const uint8_t trigger_indicator_3x8[] = {0x3e, 0x1c, 0x08};
+
+static const uint8_t channel_1_8x8[] = {0xff, 0x01, 0x01, 0x09, 0x7d, 0x01, 0x01, 0xff};
+static const uint8_t channel_2_8x8[] = {0xff, 0x01, 0x01, 0x75, 0x55, 0x59, 0x01, 0xff};
+static const uint8_t channel_3_8x8[] = {0xff, 0x01, 0x01, 0x55, 0x55, 0x7d, 0x01, 0xff};
+static const uint8_t channel_4_8x8[] = {0xff, 0x01, 0x01, 0x1d, 0x11, 0x79, 0x01, 0xff};
+
+static const uint8_t trigger_none_8x8[] = {0x00, 0x00, 0x14, 0x08, 0x3E, 0x08, 0x14, 0x00};
+static const uint8_t trigger_rising_edge_8x8[] = {0x00, 0x40, 0x40, 0x40, 0x7c, 0x04, 0x04, 0x00};
+static const uint8_t trigger_falling_edge_8x8[] = {0x00, 0x04, 0x04, 0x04, 0x7c, 0x40, 0x40, 0x00};
+static const uint8_t trigger_ext1_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x08, 0x7c};
+static const uint8_t trigger_ext2_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x74, 0x5c};
+
+static const uint8_t trigger_level_3x8[] = {0x3e, 0x1c, 0x08};
+
+static constexpr const uint8_t *channels[4] = {
+    channel_1_8x8,
+    channel_2_8x8,
+    channel_3_8x8,
+    channel_4_8x8,
+};
+
+static constexpr const uint8_t *trigger_type_icons[TriggerProcessor::TRIGGER_TYPE_LAST] = {
+    trigger_none_8x8, trigger_rising_edge_8x8, trigger_falling_edge_8x8,
+    trigger_ext1_8x8, trigger_ext2_8x8,
+};
+
 };  // namespace icons
 
 void ScopeApp::RenderScopeUI() const
@@ -498,9 +522,8 @@ void ScopeApp::RenderScopeUI() const
   namespace DEBUG = TU::DEBUG;
   auto &channel = current_channel();
 
-  graphics.setPrintPos(1, 1);
-  graphics.print((char)('1' + current_channel_));
-  graphics.drawFrame(0, 0, weegfx::Graphics::kFixedFontW + 3, weegfx::Graphics::kFixedFontH + 2);
+  graphics.drawBitmap8(0, 0, 8, icons::channels[current_channel_]);
+  graphics.drawHLine(0, 8, 8);
 
   static constexpr weegfx::coord_t bottom_text_y = 63 - 8;
 
@@ -511,7 +534,7 @@ void ScopeApp::RenderScopeUI() const
 
   auto y = 32 - (channel.trigger_level() >> 6) - 3;
   CONSTRAIN(y, 0, 58);
-  graphics.drawBitmap8(0, y, 3, icons::trigger_indicator_3x8);
+  graphics.drawBitmap8(0, y, 3, icons::trigger_level_3x8);
 
   if (ui_.ydiv_display.visible()) {
     if (ui_.edit_trigger_level) {
@@ -524,11 +547,7 @@ void ScopeApp::RenderScopeUI() const
     }
   }
 
-  const uint8_t *icon = nullptr;
-  switch (channel.trigger_type()) {
-    case TriggerProcessor::TRIGGER_TYPE_RISING: icon = icons::rising_edge_8x8; break;
-    default: break;
-  }
+  const uint8_t *icon = icons::trigger_type_icons[channel.trigger_type()];
   if (icon) graphics.drawBitmap8(128 - 8, 0, 8, icon);
   if (ui_.info_overlay.visible()) {
     graphics.setPrintPos(32, 0);
