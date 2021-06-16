@@ -45,6 +45,8 @@
 // - Raw values from ADC are inverted, but calibration offset is applied
 // - For linked channels, the assumption is that everything will /2 and "just work"
 
+// TODO buffer alignment for external triggers
+
 namespace scope {
 
 namespace menu = TU::menu;
@@ -57,6 +59,12 @@ static constexpr weegfx::coord_t kScreenHeight = weegfx::Graphics::kHeight;
 static constexpr weegfx::coord_t kScreenCenterY = kScreenHeight / 2;
 
 static constexpr weegfx::coord_t kStatusBarY = 64 - weegfx::kFixedFontH;
+
+static constexpr int kRangeVolts = 5;
+static constexpr int kTriggerLevelStepsPerV = 10;
+static constexpr int kTriggerLevelIncrement =
+    2048.f / float(kRangeVolts * kTriggerLevelStepsPerV) + 0.5f;
+static constexpr int kTriggerLevelRange = kTriggerLevelIncrement * (5 * kTriggerLevelStepsPerV - 1);
 
 static debug::AveragedCycles process_cycles;
 
@@ -277,7 +285,6 @@ public:
     if (TriggerProcessor::TRIGGER_TYPE_EXT1 == trigger_type() ||
         TriggerProcessor::TRIGGER_TYPE_EXT2 == trigger_type()) {
       if (0xffff != chunk->info.ext_trigger_offset) {
-        // SERIAL_PRINTLN("%04x", chunk->info.ext_trigger_offset);
         return chunk->info.ext_trigger_offset;
       } else {
         return buffer_length;
@@ -305,6 +312,8 @@ public:
   {
     return static_cast<TriggerProcessor::TriggerType>(get_value(SCOPE_CHANNEL_SETTING_TRIG_TYPE));
   }
+
+  int trigger_level_displayable() const { return (trigger_level() * kRangeVolts * 1000) >> 11; }
 
   int16_t trigger_level() const
   {
@@ -335,7 +344,8 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     {scope::TriggerProcessor::TRIGGER_TYPE_RISING, scope::TriggerProcessor::TRIGGER_TYPE_NONE,
      scope::TriggerProcessor::TRIGGER_TYPE_LAST - 1, "TRIG TYPE", scope::kTriggerTypeStrings,
      settings::STORAGE_TYPE_U8},
-    {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
+    {0, -scope::kTriggerLevelRange, scope::kTriggerLevelRange, "TRIG LVL", nullptr,
+     settings::STORAGE_TYPE_I32},
     {8, 0, 64, "TRIG HOLD", nullptr, settings::STORAGE_TYPE_U8},
 };
 
@@ -708,7 +718,8 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
 
   switch (ui_.edit_setting_r) {
     case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
-      main_channel().change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event_value * 32);
+      main_channel().change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
+                                  event_value * kTriggerLevelIncrement);
       ui_.edit_setting.show();
       ui_.status_bar.hide();
       break;
@@ -998,8 +1009,9 @@ void ScopeApp::RenderScopeUI() const
   auto trigger_level_y =
       to_pixel(main_ch.trigger_level(), main_ch.scaling().multiplier, main_ch.screen_yoffset()) - 3;
   if (TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
-    CONSTRAIN(trigger_level_y, 0, 58);
-    graphics.writeBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
+    auto y = trigger_level_y;
+    CONSTRAIN(y, 0, 58);
+    graphics.writeBitmap8(0, y, 3, icons::trigger_level_3x8);
   }
 
   // TOP ... [freq][trigger]
@@ -1018,10 +1030,27 @@ void ScopeApp::RenderScopeUI() const
   }
 
   if (ui_.edit_setting.visible()) {
-    // On-screen edit overlay?
-    CONSTRAIN(trigger_level_y, 0, 56);
+    // ON SCREEN EDIT OVERLAY (TRIGGER LEVEL)
+    const uint8_t *icon = nullptr;
+    if (trigger_level_y < 0) {
+      trigger_level_y = 0;
+      icon = icons::edit_indicators_8 + 3 * 2;
+    } else if (trigger_level_y > 57) {
+      trigger_level_y = 57;
+      icon = icons::edit_indicators_8 + 3;
+    }
     graphics.setPrintPos(6, trigger_level_y);
-    graphics.pretty_print(main_ch.trigger_level(), 5);
+    auto trigger_level = main_ch.trigger_level_displayable();
+    char sign = '+';
+    if (trigger_level < 0) {
+      sign = '-';
+      trigger_level = -trigger_level;
+    }
+    trigger_level += 50;
+    auto v = trigger_level / 1000;
+    graphics.printf("%c%d.%01d0V", sign, v, (trigger_level - (v * 1000)) / 100);
+
+    if (icon) graphics.drawBitmap8(6 + 36 + 1, trigger_level_y - 1, 3, icon);
   } else if (ui_.status_bar.visible()) {
     // BOTTOM STATUS BAR [CHAN][TIME][????][SCALE]
     DrawStatusBar();
