@@ -32,11 +32,11 @@ using font_glyph = const uint8_t *;
 static constexpr weegfx::coord_t kFixedFontW = 6;
 static constexpr weegfx::coord_t kFixedFontH = 8;
 
-enum DRAW_MODE {
-  DRAW_NORMAL,
-  DRAW_INVERSE,
-  DRAW_OVERWRITE,  // unused, but possible fastest
-  DRAW_CLEAR
+enum PIXEL_OP {
+  PIXEL_OP_OR,    // DST | SRC
+  PIXEL_OP_XOR,   // DST ^ SRC
+  PIXEL_OP_NAND,  // DST &= ~SRC
+  PIXEL_OP_SRC,   // DST = SRC
 };
 
 // Quick & dirty graphics for 128 x 64 framebuffer with vertical pixels.
@@ -80,6 +80,7 @@ public:
   void print(char);
   void print(int);
   void print(int, unsigned width);
+  void write(int, unsigned width);
   void print(uint16_t, unsigned width);
   void print(uint32_t, unsigned width);
   void print(long);
@@ -113,11 +114,10 @@ private:
 
   inline uint8_t *get_frame_ptr(const coord_t x, const coord_t y) __attribute__((always_inline));
 
-  template <DRAW_MODE draw_mode>
-  void blit_char(char c, coord_t x, coord_t y);
-
-  template <DRAW_MODE draw_mode>
-  void blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *src);
+  // clang-format off
+  template <PIXEL_OP pixel_op> void blit_char(char c, coord_t x, coord_t y);
+  template <PIXEL_OP pixel_op> void print_impl(const char *s);
+  // clang-format on
 };
 
 inline void Graphics::setPixel(coord_t x, coord_t y)

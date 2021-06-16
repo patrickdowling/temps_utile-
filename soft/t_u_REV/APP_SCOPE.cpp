@@ -889,7 +889,7 @@ void ScopeApp::RenderScopeUI() const
     graphics.setPrintPos(128 - weegfx::kFixedFontW * 5 - 18, 0);
     auto freq = channel.frequency();
     if (freq)
-      graphics.print(channel.frequency(), 5);
+      graphics.write(channel.frequency(), 5);
     else
       graphics.print("-----");
   }
@@ -963,19 +963,21 @@ void ScopeApp::RenderScopeUI() const
 
   // Info/debug overlay
   if (ui_.info_overlay.visible()) {
+    weegfx::coord_t x = 48;
     weegfx::coord_t y = 8;
-    graphics.setPrintPos(8, y);
-    graphics.print(channel.stats().trigger_count & 0xffff, 10);
+    graphics.setPrintPos(x, y);
+    graphics.write(channel.stats().trigger_count & 0xffff, 8);
 
-    graphics.setPrintPos(8, y + 8);
-    graphics.print(channel.stats().sample_count, 10);
+    graphics.movePrintPos(0, 8);
+    graphics.write(channel.stats().sample_count, 8);
 
-    graphics.setPrintPos(8, y + 16);
-    graphics.print(debug::cycles_to_us(process_cycles.value()), 10);
+    graphics.movePrintPos(0, 8);
+    graphics.write(debug::cycles_to_us(process_cycles.value()), 8);
   }
+
 #ifdef SCOPE_DISPLAY_DRAW_CYCLES
   graphics.setPrintPos(128 - 30, 64 - 16);
-  graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
+  graphics.write(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
 #endif
 }
 

@@ -62,73 +62,104 @@ using weegfx::Graphics;
   } while (0)
 
 // clang-format off
-template <DRAW_MODE draw_mode>
-inline uint8_t pixel_op(uint8_t a, uint8_t n) __attribute__((always_inline));
-template <> inline uint8_t pixel_op<DRAW_NORMAL>(uint8_t a, uint8_t b) { return a | b; };
-template <> inline uint8_t pixel_op<DRAW_INVERSE>(uint8_t a, uint8_t b) { return a ^ b; };
-template <> inline uint8_t pixel_op<DRAW_OVERWRITE>(uint8_t, uint8_t b) { return b; };
-template <> inline uint8_t pixel_op<DRAW_CLEAR>(uint8_t a, uint8_t b) { return a & ~b; };
+template <PIXEL_OP op>
+inline uint8_t pixel_op_impl(uint8_t a, uint8_t n) __attribute__((always_inline));
+template <> inline uint8_t pixel_op_impl<PIXEL_OP_OR>(uint8_t a, uint8_t b) { return a | b; };
+template <> inline uint8_t pixel_op_impl<PIXEL_OP_XOR>(uint8_t a, uint8_t b) { return a ^ b; };
+template <> inline uint8_t pixel_op_impl<PIXEL_OP_SRC>(uint8_t, uint8_t b) { return b; };
+template <> inline uint8_t pixel_op_impl<PIXEL_OP_NAND>(uint8_t a, uint8_t b) { return a & ~b; };
 
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask) __attribute__((always_inline));
-
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src) __attribute__((always_inline));
-
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row_lshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
-
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row_rshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
-
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void draw_pixel_row_lshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void draw_pixel_row_rshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h) __attribute__((always_inline));
+template <PIXEL_OP pixel_op> inline void blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *src);
 // clang-format on
 
-template <weegfx::DRAW_MODE draw_mode>
+template <PIXEL_OP pixel_op>
 inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask)
 {
   while (count--) {
-    *dst = pixel_op<draw_mode>(*dst, mask);
+    *dst = pixel_op_impl<pixel_op>(*dst, mask);
     ++dst;
   }
 }
 
-template <weegfx::DRAW_MODE draw_mode>
+template <PIXEL_OP pixel_op>
 inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src)
 {
   while (count--) {
-    *dst = pixel_op<draw_mode>(*dst, *src);
+    *dst = pixel_op_impl<pixel_op>(*dst, *src);
     ++dst;
     ++src;
   }
 }
 
-template <weegfx::DRAW_MODE draw_mode>
+template <PIXEL_OP pixel_op>
 inline void draw_pixel_row_lshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src,
                                   int shift)
 {
   while (count--) {
-    *dst = pixel_op<draw_mode>(*dst, *src << shift);
+    *dst = pixel_op_impl<pixel_op>(*dst, *src << shift);
     ++dst;
     ++src;
   }
 }
 
-template <weegfx::DRAW_MODE draw_mode>
+template <PIXEL_OP pixel_op>
 inline void draw_pixel_row_rshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src,
                                   int shift)
 {
   while (count--) {
-    *dst = pixel_op<draw_mode>(*dst, *src >> shift);
+    *dst = pixel_op_impl<pixel_op>(*dst, *src >> shift);
     ++dst;
     ++src;
   }
 }
 
-template <weegfx::DRAW_MODE draw_mode>
+template <PIXEL_OP pixel_op>
 inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h)
-    __attribute__((always_inline));
+{
+  weegfx::coord_t remainder = y & 0x7;
+  if (remainder) {
+    remainder = 8 - remainder;
+    uint8_t mask = ~(0xff >> remainder);
+    if (h < remainder) {
+      mask &= (0xff >> (remainder - h));
+      h = 0;
+    } else {
+      h -= remainder;
+    }
+
+    draw_pixel_row<pixel_op>(buf, w, mask);
+    buf += Graphics::kWidth;
+  }
+
+  remainder = h & 0x7;
+  h >>= 3;
+  while (h--) {
+    draw_pixel_row<pixel_op>(buf, w, 0xff);
+    buf += Graphics::kWidth;
+  }
+
+  if (remainder) { draw_pixel_row<pixel_op>(buf, w, ~(0xff << remainder)); }
+}
+
+template <PIXEL_OP pixel_op>
+inline void blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *src)
+{
+  coord_t remainder = y & 0x7;
+  if (!remainder) {
+    draw_pixel_row<pixel_op>(dst, w, src);
+  } else {
+    draw_pixel_row_lshift<pixel_op>(dst, w, src, remainder);
+    if (h >= 8) {
+      dst += Graphics::kWidth;
+      draw_pixel_row_rshift<pixel_op>(dst, w, src, 8 - remainder);
+    }
+  }
+}
 
 void Graphics::Init()
 {
@@ -149,53 +180,25 @@ void Graphics::End()
   frame_ = NULL;
 }
 
-template <weegfx::DRAW_MODE draw_mode>
-inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h)
-{
-  weegfx::coord_t remainder = y & 0x7;
-  if (remainder) {
-    remainder = 8 - remainder;
-    uint8_t mask = ~(0xff >> remainder);
-    if (h < remainder) {
-      mask &= (0xff >> (remainder - h));
-      h = 0;
-    } else {
-      h -= remainder;
-    }
-
-    draw_pixel_row<draw_mode>(buf, w, mask);
-    buf += Graphics::kWidth;
-  }
-
-  remainder = h & 0x7;
-  h >>= 3;
-  while (h--) {
-    draw_pixel_row<draw_mode>(buf, w, 0xff);
-    buf += Graphics::kWidth;
-  }
-
-  if (remainder) { draw_pixel_row<draw_mode>(buf, w, ~(0xff << remainder)); }
-}
-
 void Graphics::drawRect(coord_t x, coord_t y, coord_t w, coord_t h)
 {
   CLIPX(x, w);
   CLIPY(y, h);
-  draw_rect<DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h);
+  draw_rect<PIXEL_OP_OR>(get_frame_ptr(x, y), y, w, h);
 }
 
 void Graphics::clearRect(coord_t x, coord_t y, coord_t w, coord_t h)
 {
   CLIPX(x, w);
   CLIPY(y, h);
-  draw_rect<DRAW_CLEAR>(get_frame_ptr(x, y), y, w, h);
+  draw_rect<PIXEL_OP_NAND>(get_frame_ptr(x, y), y, w, h);
 }
 
 void Graphics::invertRect(coord_t x, coord_t y, coord_t w, coord_t h)
 {
   CLIPX(x, w);
   CLIPY(y, h);
-  draw_rect<DRAW_INVERSE>(get_frame_ptr(x, y), y, w, h);
+  draw_rect<PIXEL_OP_XOR>(get_frame_ptr(x, y), y, w, h);
 }
 
 void Graphics::drawFrame(coord_t x, coord_t y, coord_t w, coord_t h)
@@ -215,7 +218,7 @@ void Graphics::drawHLine(coord_t x, coord_t y, coord_t w)
   CLIPY(y, h);
   uint8_t *start = get_frame_ptr(x, y);
 
-  draw_pixel_row<DRAW_NORMAL>(start, w, 0x1 << (y & 0x7));
+  draw_pixel_row<PIXEL_OP_OR>(start, w, 0x1 << (y & 0x7));
 }
 
 void Graphics::drawVLine(coord_t x, coord_t y, coord_t h)
@@ -301,21 +304,6 @@ void Graphics::drawHLinePattern(coord_t x, coord_t y, coord_t w, uint8_t skip)
   }
 }
 
-template <DRAW_MODE draw_mode>
-void Graphics::blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *src)
-{
-  coord_t remainder = y & 0x7;
-  if (!remainder) {
-    draw_pixel_row<draw_mode>(dst, w, src);
-  } else {
-    draw_pixel_row_lshift<draw_mode>(dst, w, src, remainder);
-    if (h >= 8) {
-      dst += kWidth;
-      draw_pixel_row_rshift<draw_mode>(dst, w, src, 8 - remainder);
-    }
-  }
-}
-
 void Graphics::drawBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data)
 {
   if (x + w > kWidth) w = kWidth - x;
@@ -328,7 +316,7 @@ void Graphics::drawBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data)
   coord_t h = 8;
   CLIPY(y, h);
 
-  blit<DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h, data);
+  blit<PIXEL_OP_OR>(get_frame_ptr(x, y), y, w, h, data);
 }
 
 void Graphics::writeBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data)
@@ -343,7 +331,7 @@ void Graphics::writeBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data
   coord_t h = 8;
   CLIPY(y, h);
 
-  blit<DRAW_OVERWRITE>(get_frame_ptr(x, y), y, w, h, data);
+  blit<PIXEL_OP_SRC>(get_frame_ptr(x, y), y, w, h, data);
 }
 
 void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1)
@@ -438,11 +426,13 @@ static inline weegfx::font_glyph get_char_glyph(char c)
   return ssd1306xled_font6x8 + kFixedFontW * (c - 32);
 }
 
+static char print_buf[128] = {0};
+
 // OPTIMIZE When printing strings, all chars will have the same y/remainder
 // This will probably only save a few cycles, if any. Also the clipping can
 // be made optional (template?)
-template <>
-void Graphics::blit_char<weegfx::DRAW_NORMAL>(char c, coord_t x, coord_t y)
+template <PIXEL_OP pixel_op>
+void Graphics::blit_char(char c, coord_t x, coord_t y)
 {
   if (!c) c = '0';
   if (c <= 32 || c > 127) return;
@@ -458,12 +448,27 @@ void Graphics::blit_char<weegfx::DRAW_NORMAL>(char c, coord_t x, coord_t y)
   if (w <= 0) return;
   CLIPY(y, h);
 
-  blit<weegfx::DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h, data);
+  blit<pixel_op>(get_frame_ptr(x, y), y, w, h, data);
+}
+
+template <PIXEL_OP pixel_op>
+void Graphics::print_impl(const char *s)
+{
+  coord_t x = text_x_;
+  coord_t y = text_y_;
+
+  // TODO Track position, only clip when necessary or early-out?
+  while (*s) {
+    blit_char<pixel_op>(*s++, x, y);
+    x += kFixedFontW;
+  }
+
+  text_x_ = x;
 }
 
 void Graphics::print(char c)
 {
-  blit_char<DRAW_NORMAL>(c, text_x_, text_y_);
+  blit_char<PIXEL_OP_OR>(c, text_x_, text_y_);
   text_x_ += kFixedFontW;
 }
 
@@ -497,52 +502,52 @@ char *itos(type value, char *buf, size_t buflen)
 
 void Graphics::print(int value)
 {
-  char buf[12];
-  print(itos<int, false>(value, buf, sizeof(buf)));
+  print(itos<int, false>(value, print_buf, sizeof(print_buf)));
 }
 
 void Graphics::print(long value)
 {
-  char buf[24];
-  print(itos<long, false>(value, buf, sizeof(buf)));
+  print(itos<long, false>(value, print_buf, sizeof(print_buf)));
 }
 
 void Graphics::pretty_print(int value)
 {
-  char buf[12];
-  print(itos<int, true>(value, buf, sizeof(buf)));
+  print(itos<int, true>(value, print_buf, sizeof(print_buf)));
 }
 
 void Graphics::print(int value, unsigned width)
 {
-  char buf[15];
-  char *str = itos<int, false>(value, buf, sizeof(buf));
-  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
-  print(str);
+  char *str = itos<int, false>(value, print_buf, sizeof(print_buf));
+  while (str > print_buf && (unsigned)(str - print_buf) >= sizeof(print_buf) - width) *--str = ' ';
+  print_impl<PIXEL_OP_OR>(str);
+}
+
+void Graphics::write(int value, unsigned width)
+{
+  char *str = itos<int, false>(value, print_buf, sizeof(print_buf));
+  while (str > print_buf && (unsigned)(str - print_buf) >= sizeof(print_buf) - width) *--str = ' ';
+  print_impl<PIXEL_OP_SRC>(str);
 }
 
 void Graphics::print(uint16_t value, unsigned width)
 {
-  char buf[12];
-  char *str = itos<uint16_t, false>(value, buf, sizeof(buf));
-  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
+  char *str = itos<uint16_t, false>(value, print_buf, sizeof(print_buf));
+  while (str > print_buf && (unsigned)(str - print_buf) >= sizeof(print_buf) - width) *--str = ' ';
   print(str);
 }
 
 void Graphics::print(uint32_t value, size_t width)
 {
-  char buf[24];
-  char *str = itos<uint32_t, false>(value, buf, sizeof(buf));
-  while (str > buf && (size_t)(str - buf) >= sizeof(buf) - width) *--str = ' ';
+  char *str = itos<uint32_t, false>(value, print_buf, sizeof(print_buf));
+  while (str > print_buf && (size_t)(str - print_buf) >= sizeof(print_buf) - width) *--str = ' ';
   print(str);
 }
 
 void Graphics::pretty_print(int value, unsigned width)
 {
-  char buf[12];
-  char *str = itos<int, true>(value, buf, sizeof(buf));
+  char *str = itos<int, true>(value, print_buf, sizeof(print_buf));
 
-  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
+  while (str > print_buf && (unsigned)(str - print_buf) >= sizeof(print_buf) - width) *--str = ' ';
   print(str);
 }
 
@@ -552,7 +557,7 @@ void Graphics::pretty_print_right(int value)
   coord_t y = text_y_;
 
   if (!value) {
-    blit_char<DRAW_NORMAL>('0', x, y);
+    blit_char<PIXEL_OP_OR>('0', x, y);
   } else {
     char sign;
     if (value < 0) {
@@ -563,26 +568,17 @@ void Graphics::pretty_print_right(int value)
     }
 
     while (value) {
-      blit_char<DRAW_NORMAL>('0' + value % 10, x, y);
+      blit_char<PIXEL_OP_OR>('0' + value % 10, x, y);
       x -= kFixedFontW;
       value /= 10;
     }
-    if (sign) blit_char<DRAW_NORMAL>(sign, x, y);
+    if (sign) blit_char<PIXEL_OP_OR>(sign, x, y);
   }
 }
 
 void Graphics::print(const char *s)
 {
-  coord_t x = text_x_;
-  coord_t y = text_y_;
-
-  // TODO Track position, only clip when necessary or early-out?
-  while (*s) {
-    blit_char<DRAW_NORMAL>(*s++, x, y);
-    x += kFixedFontW;
-  }
-
-  text_x_ = x;
+  print_impl<PIXEL_OP_OR>(s);
 }
 
 void Graphics::print(const char *s, unsigned len)
@@ -590,7 +586,7 @@ void Graphics::print(const char *s, unsigned len)
   coord_t x = text_x_;
   coord_t y = text_y_;
   while (*s && len--) {
-    blit_char<DRAW_NORMAL>(*s++, x, y);
+    blit_char<PIXEL_OP_OR>(*s++, x, y);
     x += kFixedFontW;
   }
 
@@ -606,25 +602,23 @@ void Graphics::print_right(const char *s)
 
   while (c > s) {
     x -= kFixedFontW;
-    blit_char<DRAW_NORMAL>(*--c, x, y);
+    blit_char<PIXEL_OP_OR>(*--c, x, y);
   }
 }
-
-static char buf[128] = {0};
 
 void Graphics::printf(const char *fmt, ...)
 {
   va_list args;
   va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
+  vsnprintf(print_buf, sizeof(print_buf), fmt, args);
   va_end(args);
-  print(buf);
+  print(print_buf);
 }
 
 void Graphics::drawStr(coord_t x, coord_t y, const char *s)
 {
   while (*s) {
-    blit_char<DRAW_NORMAL>(*s++, x, y);
+    blit_char<PIXEL_OP_OR>(*s++, x, y);
     x += kFixedFontW;
   }
 }
