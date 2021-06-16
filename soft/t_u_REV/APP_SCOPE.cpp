@@ -57,6 +57,8 @@ static constexpr uint32_t kTriggerLostIndicatorTimeoutTicks = TU_CORE_ISR_FREQ /
 static constexpr weegfx::coord_t kScreenHeight = weegfx::Graphics::kHeight;
 static constexpr weegfx::coord_t kScreenCenterY = kScreenHeight / 2;
 
+static constexpr weegfx::coord_t kStatusBarY = 64 - weegfx::kFixedFontH;
+
 static debug::AveragedCycles process_cycles;
 
 enum InputRange {
@@ -394,13 +396,22 @@ private:
     int holdoff = 0;
   } trigger_state_;
 
+  // The channel configuration is packed into an int so access within ISR is atomic.
+  // We're relying on the fact that channel index = ADC channel
+  // Still tempted to just use a union, even if technically UB.
+  // Still tempted to just use a union, even if technically UB.
   struct ChannelConfig {
     constexpr ChannelConfig() : packed_value{Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST)} {}
     ChannelConfig(ADC_CHANNEL main) : packed_value{Pack(main, ADC_CHANNEL_LAST)} {}
     ChannelConfig(ADC_CHANNEL main, ADC_CHANNEL aux) : packed_value{Pack(main, aux)} {}
 
+    int main() const { return packed_value & 0xffff; }
+    int aux() const { return packed_value >> 16; }
+
     ADC_CHANNEL main_adc_channel() const { return static_cast<ADC_CHANNEL>(packed_value & 0xffff); }
     ADC_CHANNEL aux_adc_channel() const { return static_cast<ADC_CHANNEL>((packed_value >> 16)); }
+
+    bool linked() const { return ADC_CHANNEL_LAST != aux_adc_channel(); }
 
     int packed_value = Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST);
 
@@ -423,10 +434,10 @@ private:
   static CircularSampleBuffer sample_buffer_;
   static DisplayFrameBuffer display_frame_buffer_;
 
-  const ScopeChannel &main_channel() const { return channels_[channel_config_.main_adc_channel()]; }
-  ScopeChannel &main_channel() { return channels_[channel_config_.main_adc_channel()]; }
+  const ScopeChannel &main_channel() const { return channels_[channel_config_.main()]; }
+  ScopeChannel &main_channel() { return channels_[channel_config_.main()]; }
 
-  const ScopeChannel &aux_channel() const { return channels_[channel_config_.aux_adc_channel()]; }
+  const ScopeChannel &aux_channel() const { return channels_[channel_config_.aux()]; }
 
   int selected_channel_index() const { return get_value(SCOPE_APP_SETTING_CHANNEL); }
   ScopeChannel &selected_channel() { return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)]; }
@@ -444,6 +455,9 @@ private:
   void RenderDisplayBuffer() const;
   void RenderMenu() const;
   void RenderScopeUI() const;
+
+  void DrawStatusBar() const;
+  void DisplayFrequencyCounter(weegfx::coord_t x, weegfx::coord_t y, uint32_t frequency) const;
 
   void UpdateDisplayBuffer();
 
@@ -686,6 +700,8 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
+  // TODO handle linked channels
+
   auto &channel = selected_channel();
   switch (ui_.edit_setting_r) {
     case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
@@ -738,14 +754,18 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderR)
 
 void ScopeApp::UpdateChannelConfig()
 {
-  ADC_CHANNEL main = static_cast<ADC_CHANNEL>(get_value(SCOPE_APP_SETTING_CHANNEL));
-  ADC_CHANNEL aux;
-  if (ADC_CHANNEL_1 == main && get_value(SCOPE_APP_SETTING_LINK12))
+  auto channel_index = selected_channel_index();
+
+  ADC_CHANNEL main = static_cast<ADC_CHANNEL>(channel_index);
+  ADC_CHANNEL aux = ADC_CHANNEL_LAST;
+
+  if (channel_index < 2 && get_value(SCOPE_APP_SETTING_LINK12)) {
+    main = ADC_CHANNEL_1;
     aux = ADC_CHANNEL_2;
-  else if (ADC_CHANNEL_3 == main && get_value(SCOPE_APP_SETTING_LINK34))
+  } else if (channel_index >= 2 && get_value(SCOPE_APP_SETTING_LINK34)) {
+    main = ADC_CHANNEL_3;
     aux = ADC_CHANNEL_4;
-  else
-    aux = ADC_CHANNEL_LAST;
+  }
 
   channel_config_ = {main, aux};
 }
@@ -855,7 +875,7 @@ void ScopeApp::RenderDisplayBuffer() const
   auto frame = current_display_frame_;
   if (!frame) return;
 
-  if (ADC_CHANNEL_LAST != channel_config_.aux_adc_channel()) {
+  if (channel_config_.linked()) {
     DrawWaveform(frame->buffer, 2, main_channel().scaling().multiplier,
                  main_channel().screen_yoffset());
     DrawWaveform(frame->buffer + 1, 2, aux_channel().scaling().multiplier,
@@ -867,10 +887,10 @@ void ScopeApp::RenderDisplayBuffer() const
 }
 
 namespace icons {
-static const uint8_t channel_1_7x8[] = {0xff, 0x81, 0x81, 0x89, 0xbd, 0x81, 0xff};
-static const uint8_t channel_2_7x8[] = {0xff, 0x81, 0xb5, 0xb5, 0xad, 0x81, 0xff};
-static const uint8_t channel_3_7x8[] = {0xff, 0x81, 0xa5, 0xb5, 0xbd, 0x81, 0xff};
-static const uint8_t channel_4_7x8[] = {0xff, 0x81, 0x9d, 0x91, 0xbd, 0x81, 0xff};
+static const uint8_t channel_y_1_7x8[] = {0xff, 0x81, 0x81, 0x89, 0xbd, 0x81, 0xff};
+static const uint8_t channel_y_2_7x8[] = {0xff, 0x81, 0xb5, 0xb5, 0xad, 0x81, 0xff};
+static const uint8_t channel_y_3_7x8[] = {0xff, 0x81, 0xa5, 0xb5, 0xbd, 0x81, 0xff};
+static const uint8_t channel_y_4_7x8[] = {0xff, 0x81, 0x9d, 0x91, 0xbd, 0x81, 0xff};
 
 static const uint8_t trigger_rising_edge_8x8[] = {0x00, 0x80, 0x90, 0x98, 0xff, 0x19, 0x11, 0x00};
 static const uint8_t trigger_falling_edge_8x8[] = {0x00, 0x01, 0x09, 0x19, 0xff, 0x98, 0x88, 0x00};
@@ -884,10 +904,10 @@ static const uint8_t range_bi_7x8[] = {0xf0, 0x50, 0x30, 0x10, 0x18, 0x14, 0x1e,
 static const uint8_t range_uni_7x8[] = {0x80, 0xc0, 0xa0, 0x90, 0x88, 0x84, 0xfe, 0x00};
 
 static constexpr const uint8_t *channels[4] = {
-    channel_1_7x8,
-    channel_2_7x8,
-    channel_3_7x8,
-    channel_4_7x8,
+    channel_y_1_7x8,
+    channel_y_2_7x8,
+    channel_y_3_7x8,
+    channel_y_4_7x8,
 };
 
 static constexpr const uint8_t *trigger_type_icons[TriggerProcessor::TRIGGER_TYPE_LAST] = {
@@ -905,6 +925,13 @@ const uint8_t unit_us_8[] = {0xf8, 0x40, 0x78, 0x00, 0x58, 0x68};
 const uint8_t unit_khz_8[] = {0x00, 0x7c, 0x10, 0x68, 0x00,  // hz ->
                               0x7e, 0x08, 0x08, 0x7e, 0x00, 0x48, 0x68, 0x58};
 
+const uint8_t channel_numbers_7x8[] = {
+    0x00, 0x00, 0x42, 0x7F, 0x40, 0x00, 0x00,  // 1
+    0x00, 0x42, 0x61, 0x51, 0x49, 0x46, 0x00,  // 2
+    0x00, 0x21, 0x41, 0x45, 0x4B, 0x31, 0x00,  // 3
+    0x00, 0x18, 0x14, 0x12, 0x7F, 0x10, 0x00,  // 4
+};
+
 inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
                          const settings::value_attr &attr)
 {
@@ -916,99 +943,110 @@ inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
   graphics.drawBitmap8(x - 3, y, 3, src);
 }
 
+static inline void DrawChannel(weegfx::coord_t x, weegfx::coord_t y, int channel)
+{
+  graphics.writeBitmap8(x, y, 7, icons::channel_numbers_7x8 + (channel * 7));
+}
+static inline void DrawLinkedChannels(weegfx::coord_t x, weegfx::coord_t y, int first_channel)
+{
+  graphics.writeBitmap8(x, y, 14, icons::channel_numbers_7x8 + (first_channel * 7));
+  graphics.drawHLinePattern(x, y - 1, 14, 2);
+}
+
 };  // namespace icons
 
 void ScopeApp::RenderScopeUI() const
 {
   namespace DEBUG = TU::DEBUG;
-  auto channel_index = selected_channel_index();
-  auto &channel = selected_channel();
+  // NOTE In linked mode, some values are always from the main channel
+  auto &main_ch = main_channel();
+  auto &selected_ch = selected_channel();
 
-  // Top [channel] .... [freq][trigger]
+  // LEFT channel label(s)/"GND" offset indicator
   if (!ui_.status_bar.visible()) {
-    weegfx::coord_t y = channel.screen_yoffset() - 7;
-    CONSTRAIN(y, 0, 64 - 8);
-    graphics.writeBitmap8(3, y, 7, icons::channels[channel_index]);
-  }
+    weegfx::coord_t x = 3;
+    weegfx::coord_t my = main_channel().screen_yoffset() - 7;
+    CONSTRAIN(my, 0, 64 - 8);
 
-  auto trigger_type = channel.trigger_type();
-
-  if (display_frequency_counter() && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
-    weegfx::coord_t x = 128 - 18;
-    weegfx::coord_t y = 0;
-    weegfx::coord_t w = sizeof(icons::unit_khz_8);
-    auto unit = icons::unit_khz_8;
-
-    auto freq = channel.frequency();
-    char freq_str[16] = "-";
-    if (freq > 1000) {
-      auto khz = freq / 1000;
-      sprintf(freq_str, "%lu.%.02lu", khz, ((freq - (khz * 1000))) / 10);
-    } else if (freq) {
-      sprintf(freq_str, "%lu", freq);
-      unit += 4;
-      w -= 4;
+    if (channel_config_.linked()) {
+      weegfx::coord_t y = aux_channel().screen_yoffset() - 7;
+      CONSTRAIN(y, 0, 64 - 8);
+      graphics.writeBitmap8(y == my ? x + 3 : x, y, 7, icons::channels[channel_config_.aux()]);
     }
-    x -= w;
-    graphics.setPrintPos(x, y);
-    graphics.write_right(freq_str);
-    graphics.writeBitmap8(x + 1, y, w, unit);
+    graphics.writeBitmap8(x, my, 7, icons::channels[channel_config_.main()]);
   }
 
-  const uint8_t *icon = icons::trigger_type_icons[trigger_type];
-  weegfx::coord_t x = 128 - 8;
-  if (icon) {
-    graphics.writeBitmap8(x, 0, 8, icon);
-    x -= 7;
-  }
-  if (ui_.trigger_lost) { graphics.writeBitmap8(x, 0, 6, icons::trigger_lost_6x8); }
-
-  // Left: Trigger level
+  // LEFT Trigger level
+  auto trigger_type = main_ch.trigger_type();
   auto trigger_level_y =
-      to_pixel(channel.trigger_level(), channel.scaling().multiplier, channel.screen_yoffset()) - 3;
+      to_pixel(main_ch.trigger_level(), main_ch.scaling().multiplier, main_ch.screen_yoffset()) - 3;
   if (TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
     CONSTRAIN(trigger_level_y, 0, 58);
     graphics.writeBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
+  }
+
+  // TOP ... [freq][trigger]
+  if (display_frequency_counter() && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type)
+    DisplayFrequencyCounter(128 - 18, 0, main_ch.frequency());
+
+  {
+    const uint8_t *icon = icons::trigger_type_icons[trigger_type];
+    weegfx::coord_t x = 128 - 8;
+    if (icon) {
+      graphics.writeBitmap8(x, 0, 8, icon);
+      x -= 7;
+    }
+    if (ui_.trigger_lost) { graphics.writeBitmap8(x, 0, 6, icons::trigger_lost_6x8); }
   }
 
   if (ui_.edit_setting.visible()) {
     // On-screen edit overlay?
     CONSTRAIN(trigger_level_y, 0, 56);
     graphics.setPrintPos(6, trigger_level_y);
-    graphics.pretty_print(channel.trigger_level(), 5);
+    graphics.pretty_print(main_ch.trigger_level(), 5);
   } else if (ui_.status_bar.visible()) {
-    // Bottom [channel][?????][timebase][scale]
-    weegfx::coord_t bottom_text_y = 64 - weegfx::kFixedFontH;
+    // BOTTOM STATUS BAR [CHAN][TIME][????][SCALE]
+    DrawStatusBar();
 
-    graphics.clearRect(0, bottom_text_y, 128, 8);
-    graphics.drawHLine(0, bottom_text_y - 1, 128);
-    graphics.drawAlignedByte(32, bottom_text_y, 0xaa);
-    graphics.drawAlignedByte(64, bottom_text_y, 0xaa);
-    graphics.drawAlignedByte(96, bottom_text_y, 0xaa);
-
-    bool edit_channel = SCOPE_CHANNEL_SETTING_LAST == ui_.edit_setting_l;
-
+    weegfx::coord_t x = 0;
+    weegfx::coord_t bottom_text_y = kStatusBarY;
     bottom_text_y++;
-    if (edit_channel) {
-      weegfx::coord_t x = 0;
-      for (int c = 0; c < kNumChannels; ++c) {
-        graphics.setPrintPos(x, bottom_text_y);
-        graphics.print((char)('1' + c));
-        x += weegfx::kFixedFontW + 1;
+
+    // [CHAN]
+    {
+      if (SCOPE_CHANNEL_SETTING_LAST == ui_.edit_setting_l) {
+        // Channel selection mode
+        if (get_value(SCOPE_APP_SETTING_LINK12)) {
+          icons::DrawLinkedChannels(x, bottom_text_y, 0);
+        } else {
+          icons::DrawChannel(x, bottom_text_y, 0);
+          icons::DrawChannel(x + weegfx::kFixedFontW + 1, bottom_text_y, 1);
+        }
+        x += 2 * (weegfx::kFixedFontW + 1);
+        if (get_value(SCOPE_APP_SETTING_LINK34)) {
+          icons::DrawLinkedChannels(x, bottom_text_y, 2);
+        } else {
+          icons::DrawChannel(x, bottom_text_y, 2);
+          icons::DrawChannel(x + weegfx::kFixedFontW + 1, bottom_text_y, 3);
+        }
+      } else {
+        // Just display active channel(s)
+        x = channel_config_.main() * (weegfx::kFixedFontW + 1);
+        if (channel_config_.linked())
+          icons::DrawLinkedChannels(x, bottom_text_y, channel_config_.main());
+        else
+          icons::DrawChannel(x, bottom_text_y, channel_config_.main());
       }
-      graphics.invertRect(channel_index * (weegfx::kFixedFontW + 1), bottom_text_y,
+      graphics.invertRect(selected_channel_index() * (weegfx::kFixedFontW + 1), bottom_text_y,
                           weegfx::kFixedFontW + 1, weegfx::kFixedFontH + 1);
-    } else {
-      graphics.setPrintPos(channel_index * (weegfx::kFixedFontW + 1), bottom_text_y);
-      graphics.print((char)('1' + channel_index));
     }
 
     x = 32 + 6;
-    if (!edit_channel)
-      icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.xdiv(),
-                          channel.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
+    if (SCOPE_CHANNEL_SETTING_XDIV == ui_.edit_setting_l)
+      icons::DrawEditIcon(x - 1, bottom_text_y - 1, main_ch.xdiv(),
+                          main_ch.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
     graphics.setPrintPos(x, bottom_text_y);
-    auto label = channel.timebase().label;
+    auto label = main_ch.timebase().label;
     graphics.print(label, 3);
     switch (label[3]) {
       case 'm': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_ms_8); break;
@@ -1017,15 +1055,15 @@ void ScopeApp::RenderScopeUI() const
 
     x = 96 - 8;
     auto range_icon =
-        INPUT_RANGE_BI == channel.input_range() ? icons::range_bi_7x8 : icons::range_uni_7x8;
+        INPUT_RANGE_BI == selected_ch.input_range() ? icons::range_bi_7x8 : icons::range_uni_7x8;
     graphics.writeBitmap8(x, bottom_text_y - 1, 7, range_icon);
 
     x = 96 + 6;
     if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r)
-      icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.ydiv(),
-                          channel.value_attr(SCOPE_CHANNEL_SETTING_YDIV));
+      icons::DrawEditIcon(x - 1, bottom_text_y - 1, selected_ch.ydiv(),
+                          selected_ch.value_attr(SCOPE_CHANNEL_SETTING_YDIV));
     graphics.setPrintPos(x, bottom_text_y);
-    graphics.printf(channel.scaling().label);
+    graphics.printf(selected_ch.scaling().label);
   }
 
   // Info/debug overlay
@@ -1033,11 +1071,11 @@ void ScopeApp::RenderScopeUI() const
     weegfx::coord_t x = 64 - 48;
     weegfx::coord_t y = 8;
     graphics.setPrintPos(x, y);
-    graphics.write(channel.stats().trigger_count & 0xffff, 8);
+    graphics.write(main_ch.stats().trigger_count & 0xffff, 8);
 
     y += 8;
     graphics.setPrintPos(x, y);
-    graphics.write(channel.stats().sample_count, 8);
+    graphics.write(main_ch.stats().sample_count, 8);
 
     y += 8;
     graphics.setPrintPos(x, y);
@@ -1045,7 +1083,7 @@ void ScopeApp::RenderScopeUI() const
 
     y += 8;
     graphics.setPrintPos(x, y);
-    graphics.write(channel.frequency(), 8);
+    graphics.write(main_ch.frequency(), 8);
   }
 
 #ifdef SCOPE_DISPLAY_DRAW_CYCLES
@@ -1054,8 +1092,39 @@ void ScopeApp::RenderScopeUI() const
 #endif
 }
 
+void ScopeApp::DrawStatusBar() const
+{
+  graphics.clearRect(0, kStatusBarY, 128, 8);
+  graphics.drawHLine(0, kStatusBarY - 1, 128);
+  graphics.drawAlignedByte(32, kStatusBarY, 0xaa);
+  graphics.drawAlignedByte(64, kStatusBarY, 0xaa);
+  graphics.drawAlignedByte(96, kStatusBarY, 0xaa);
+}
+
+void ScopeApp::DisplayFrequencyCounter(weegfx::coord_t x, weegfx::coord_t y,
+                                       uint32_t frequency) const
+{
+  weegfx::coord_t w = sizeof(icons::unit_khz_8);
+  auto unit = icons::unit_khz_8;
+
+  char freq_str[16] = "-";
+  if (frequency > 1000) {
+    auto khz = frequency / 1000;
+    sprintf(freq_str, "%lu.%.02lu", khz, ((frequency - (khz * 1000))) / 10);
+  } else if (frequency) {
+    sprintf(freq_str, "%lu", frequency);
+    unit += 4;
+    w -= 4;
+  }
+  x -= w;
+  graphics.setPrintPos(x, y);
+  graphics.write_right(freq_str);
+  graphics.writeBitmap8(x + 1, y, w, unit);
+}
+
 void ScopeApp::Activate()
 {
+  UpdateChannelConfig();
   ConfigureADC();
   TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_1);
 }
