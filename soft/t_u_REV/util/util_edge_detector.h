@@ -28,14 +28,28 @@
 
 namespace util {
 
+template <int count>
+struct EdgeMask {};
+template <>
+struct EdgeMask<2> {
+  static constexpr uint32_t kEdgeMask = 0xf;
+  static constexpr uint32_t kRisingEdge = 0x03;  // 0011
+  static constexpr uint32_t kFallingEdge = 0xc;  // 1100
+};
+
+template <>
+struct EdgeMask<1> {
+  static constexpr uint32_t kEdgeMask = 0x3;
+  static constexpr uint32_t kRisingEdge = 0x1;   // 0001
+  static constexpr uint32_t kFallingEdge = 0x2;  // 0010
+};
+
 // "rising" and "falling" are relative to cmp, i.e. false->true and true->false transitions.
-template <typename T>
+template <typename T, int count>
 class EdgeDetector {
 public:
   using State = uint32_t;
-  static constexpr uint32_t kEdgeMask = 0xf;
-  static constexpr uint32_t kRisingEdge = 0x3;   // 0011
-  static constexpr uint32_t kFallingEdge = 0xc;  // 1100
+  using masks = EdgeMask<count>;
 
   EdgeDetector(T threshold, State state) : threshold_(threshold), state_(state) {}
 
@@ -46,8 +60,8 @@ public:
   }
   void Reset() { state_ = 0; }
 
-  inline bool rising_edge() const { return (state_ & kEdgeMask) == kRisingEdge; }
-  inline bool falling_edge() const { return (state_ & kEdgeMask) == kFallingEdge; }
+  inline bool rising_edge() const { return (state_ & masks::kEdgeMask) == masks::kRisingEdge; }
+  inline bool falling_edge() const { return (state_ & masks::EdgeMask) == masks::FallingEdge; }
 
   inline State state() const { return state_; }
 

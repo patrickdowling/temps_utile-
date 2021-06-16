@@ -38,6 +38,7 @@
 #include "util/util_circular_sample_buffer.h"
 #include "util/util_edge_detector.h"
 #include "util/util_popup.h"
+#include "util/util_sample_decimator.h"
 #include "util/util_settings.h"
 
 // NOTES
@@ -46,6 +47,9 @@
 // - For linked channels, the assumption is that everything will /2 and "just work"
 
 // TODO buffer alignment for external triggers
+// TODO If external trigger mode, infinite hodloff?
+// TODO Shared vs. common settings (linked vs. advanced mode)
+// TODO Instead of decimating incoming samples, do it when reading the buffer (or rendering?)
 
 namespace scope {
 
@@ -124,7 +128,7 @@ public:
 private:
   Stats stats_;
 
-  using EdgeDetector = util::EdgeDetector<int16_t>;
+  using EdgeDetector = util::EdgeDetector<int16_t, 2>;
 
   EdgeDetector::State edge_detector_state_ = 0;
 
@@ -192,6 +196,7 @@ static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_
 struct TimebaseParameters {
   const char *const label;
   uint32_t adc_frequency;
+  uint32_t decimate;
   // auto gain?
   // retrigger delay
 };
@@ -199,26 +204,30 @@ struct TimebaseParameters {
 // BEGIN generated via resources/scope_divs.py
 // clang-format off
 enum Timebase {
-  TIMEBASE_2000,
-  TIMEBASE_1000,
-  TIMEBASE_500,
-  TIMEBASE_200,
-  TIMEBASE_100,
-  TIMEBASE_50,
-  TIMEBASE_20,
-  TIMEBASE_10,
+  TIMEBASE_500u,
+  TIMEBASE_1m,
+  TIMEBASE_2m,
+  TIMEBASE_5m,
+  TIMEBASE_10m,
+  TIMEBASE_20m,
+  TIMEBASE_50m,
+  TIMEBASE_100m,
+  TIMEBASE_1s,
+  TIMEBASE_2s,
   TIMEBASE_LAST,
 };
 
 static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
-{ .label = "500u", .adc_frequency = 256000 },
-{ .label = "  1m", .adc_frequency = 128000 },
-{ .label = "  2m", .adc_frequency = 64000 },
-{ .label = "  5m", .adc_frequency = 25600 },
-{ .label = " 10m", .adc_frequency = 12800 },
-{ .label = " 20m", .adc_frequency = 6400 },
-{ .label = " 50m", .adc_frequency = 2560 },
-{ .label = "100m", .adc_frequency = 1280 },
+{ .label = "500u", .adc_frequency = 256000, .decimate = 1 },
+{ .label = "  1m", .adc_frequency = 128000, .decimate = 1 },
+{ .label = "  2m", .adc_frequency = 64000, .decimate = 1 },
+{ .label = "  5m", .adc_frequency = 25600, .decimate = 1 },
+{ .label = " 10m", .adc_frequency = 12800, .decimate = 1 },
+{ .label = " 20m", .adc_frequency = 6400, .decimate = 1 },
+{ .label = " 50m", .adc_frequency = 2560, .decimate = 1 },
+{ .label = "100m", .adc_frequency = 1280, .decimate = 1 },
+{ .label = "  1s", .adc_frequency = 2048, .decimate = 16 },
+{ .label = "  2s", .adc_frequency = 1024, .decimate = 16 },
 };
 // clang-format on
 // END generated
@@ -429,13 +438,15 @@ private:
 
   struct FrameInfo {
     int num_channels = 1;
-    size_t read_length = 0;
+    size_t length = 0;
   };
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 4>;
   using DisplayFrameBuffer = util::FrameBuffer<kDisplayFrameSize, 2, int16_t, FrameInfo>;
+  using DisplayFrame = DisplayFrameBuffer::Frame;
+  using SampleDecimator = util::SampleDecimator<kADCChunkSize>;
 
-  const DisplayFrameBuffer::Frame *current_display_frame_ = nullptr;
+  const DisplayFrame *current_display_frame_ = nullptr;
   ScopeChannel channels_[kNumChannels];
 
   static CircularSampleBuffer sample_buffer_;
@@ -458,7 +469,7 @@ private:
   void ConfigureTR();
 
   static void DrawGraticule();
-  static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
+  static void DrawWaveform(const int16_t *buffer, size_t length, size_t stride, int32_t multiplier,
                            const weegfx::coord_t y);
   void RenderDisplayBuffer() const;
   void RenderMenu() const;
@@ -522,29 +533,26 @@ void ScopeApp::Process()
   uint32_t trigger_lost = ui_.trigger_lost;
   if (trigger_lost) --trigger_lost;
 
+  const auto channel_config = channel_config_;
+  auto &channel = channels_[channel_config.main()];
+  auto timebase = channel.timebase();
+
   auto &adc_chunks = TU::ADC::chunk_buffers();
   while (adc_chunks.readable()) {
     debug::ScopedCycleMeasurement cycles{process_cycles};
 
-    auto adc_chunk = adc_chunks.readable_frame();
-
-    const auto channel_config = channel_config_;
     // Process input buffer; if already triggered we don't really need to find a new one yet but
-    // this might handle more than just triggers eventually
-    auto &channel = channels_[channel_config.main()];
+    // the process function also handles other stats (e.g. frequency counter)
+    auto adc_chunk = adc_chunks.readable_frame();
     auto trigger = channel_config.linked() ? channel.Process<kADCChunkSize, 2>(adc_chunk)
                                            : channel.Process<kADCChunkSize, 1>(adc_chunk);
 
     auto sample_writer = sample_buffer_.writer();
-#if 0
-    // Decimate data into circular sample buffer/history
-    util::SampleDecimator::Process<kADCChunkSize>(sample_writer, adc_chunk_buffer_, 1);
-    // TODO account for decimation during further operations
-    // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
-#else
-    // TODO without decimation, this step is somewhat moot
-    sample_writer = std::copy(adc_chunk->buffer, adc_chunk->buffer + kADCChunkSize, sample_writer);
-#endif
+    // TODO account for linked channels?
+    sample_writer =
+        timebase.decimate > 1
+            ? SampleDecimator::Process(sample_writer, adc_chunk->buffer, timebase.decimate)
+            : std::copy(adc_chunk->buffer, adc_chunk->buffer + kADCChunkSize, sample_writer);
     adc_chunks.read();
     sample_writer.Commit();
 
@@ -552,7 +560,10 @@ void ScopeApp::Process()
     size_t read_length = 0;
     if (trigger_state_.triggered) {
       if (sample_buffer_.available() < kDisplayFrameSize) {
-        // still accumulating (doesn't happen, since we got more data to get here)
+        // still accumulating. This should generally only happen if decimating, otherwise the new
+        // data in this pass should have filled the buffer. So if decimation > 1, display partial
+        // buffers (since that's likely slow update rate).
+        if (timebase.decimate > 1) read_length = sample_buffer_.available();
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
@@ -564,10 +575,12 @@ void ScopeApp::Process()
         --trigger_state_.holdoff;
       } else {
         if (trigger < kADCChunkSize) {
+          if (timebase.decimate) trigger /= timebase.decimate;
           trigger_state_.triggered = true;
           auto n = kADCChunkSize - trigger;
           sample_buffer_.SetReadOffset(-n - kDisplayFrameSize / 2);
         } else {
+          // This provides a scrolling view
           trigger_lost = kTriggerLostIndicatorTimeoutTicks;
           sample_buffer_.SetReadOffset(-kDisplayFrameSize);
           read_length = kDisplayFrameSize;
@@ -578,7 +591,8 @@ void ScopeApp::Process()
     if (read_length && display_frame_buffer_.writeable()) {
       auto frame = display_frame_buffer_.writeable_frame();
       sample_buffer_.Read(frame->buffer, read_length);
-      frame->info.read_length = read_length;
+      frame->info.num_channels = channel_config.linked() ? 2 : 1;
+      frame->info.length = read_length;
       display_frame_buffer_.written();
     }
   }
@@ -881,10 +895,10 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier,
   return px;
 }
 
-/*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
-                                       const weegfx::coord_t y)
+/*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, size_t length, size_t stride,
+                                       int32_t multiplier, const weegfx::coord_t y)
 {
-  auto end = buffer + kDisplayFrameSize;
+  auto end = buffer + length;
 
   weegfx::coord_t x = 0;
   auto y1 = to_pixel(*buffer, multiplier, y);
@@ -901,16 +915,18 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier,
 void ScopeApp::RenderDisplayBuffer() const
 {
   auto frame = current_display_frame_;
-  if (!frame) return;
+  if (frame) {
+    auto length = frame->info.length;
 
-  if (channel_config_.linked()) {
-    DrawWaveform(frame->buffer, 2, main_channel().scaling().multiplier,
-                 main_channel().screen_yoffset());
-    DrawWaveform(frame->buffer + 1, 2, aux_channel().scaling().multiplier,
-                 aux_channel().screen_yoffset());
-  } else {
-    DrawWaveform(frame->buffer, 1, main_channel().scaling().multiplier,
-                 main_channel().screen_yoffset());
+    if (frame->info.num_channels > 1) {
+      DrawWaveform(frame->buffer, length, 2, main_channel().scaling().multiplier,
+                   main_channel().screen_yoffset());
+      DrawWaveform(frame->buffer + 1, length, 2, aux_channel().scaling().multiplier,
+                   aux_channel().screen_yoffset());
+    } else {
+      DrawWaveform(frame->buffer, length, 1, main_channel().scaling().multiplier,
+                   main_channel().screen_yoffset());
+    }
   }
 }
 
@@ -950,6 +966,7 @@ const uint8_t edit_indicators_8[3 * 3] = {
 
 const uint8_t unit_ms_8[] = {0x78, 0x18, 0x78, 0x00, 0x58, 0x68};
 const uint8_t unit_us_8[] = {0xf8, 0x40, 0x78, 0x00, 0x58, 0x68};
+const uint8_t unit_s_8[] = {0x00, 0x48, 0x54, 0x54, 0x54, 0x20};
 const uint8_t unit_khz_8[] = {0x00, 0x7c, 0x10, 0x68, 0x00,  // hz ->
                               0x7e, 0x08, 0x08, 0x7e, 0x00, 0x48, 0x68, 0x58};
 
@@ -1098,6 +1115,7 @@ void ScopeApp::RenderScopeUI() const
     switch (label[3]) {
       case 'm': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_ms_8); break;
       case 'u': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_us_8); break;
+      case 's': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_s_8); break;
     }
 
     x = 96 - 8;

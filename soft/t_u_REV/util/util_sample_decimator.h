@@ -26,10 +26,11 @@
 
 namespace util {
 
+template <size_t buffer_length>
 class SampleDecimator {
 public:
-  template <size_t buffer_length, typename output_it>
-  static void Process(output_it dst, const int16_t *src, size_t stride)
+  template <typename input_it, typename output_it>
+  static output_it Process(output_it dst, input_it src, size_t stride)
   {
     auto end = src + buffer_length;
     while (src < end) {
