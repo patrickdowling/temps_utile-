@@ -40,8 +40,6 @@
 #include "util/util_popup.h"
 #include "util/util_settings.h"
 
-#define SCOPE_DISPLAY_DRAW_CYCLES
-
 // NOTES
 // - SIMD processing of buffers?
 // - Raw values from ADC are inverted, so we use calibration offset
@@ -374,7 +372,7 @@ public:
   void Activate();
 
   bool display_frequency_counter() const { return get_value(SCOPE_APP_SETTING_FREQ_COUNTER); }
-  bool display_stats_overlay() const { return get_value(SCOPE_APP_SETTING_STATS_OVERLAY); }
+  int display_stats_overlay() const { return get_value(SCOPE_APP_SETTING_STATS_OVERLAY); }
 
 private:
   struct {
@@ -487,11 +485,13 @@ private:
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
 /*static*/ ScopeApp::DisplayFrameBuffer ScopeApp::display_frame_buffer_ __attribute__((aligned(4)));
 
+static const char *const stats_overlay_strings[] = {"off", "proc", "draw"};
+
 SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
     {1, 0, 1, "Disp freq", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
-    {0, 0, 1, "Disp stats", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
+    {0, 0, 2, "Disp stats", scope::stats_overlay_strings, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 1+2", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 3+4", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 0, "Reset", nullptr, settings::STORAGE_TYPE_NOP}};
@@ -600,6 +600,8 @@ size_t ScopeApp::RestoreState(util::StreamBufferReader &stream_buffer)
 
 /*static*/ const ScopeApp::EventHandler ScopeApp::menu_event_handlers[] = {
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleMenu},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::toggleMenu},
+    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::toggleMenu},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::menuButtonL},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::menuButtonR},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::menuEncoderL},
@@ -608,11 +610,11 @@ size_t ScopeApp::RestoreState(util::StreamBufferReader &stream_buffer)
 };
 
 /*static*/ const ScopeApp::EventHandler ScopeApp::scope_button_handlers[] = {
-    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleMenu},
+    {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_UP, &ScopeApp::toggleInputRange},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::scopeButtonDown},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::scopeButtonL},
+    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::toggleMenu},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::scopeButtonR},
-    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::toggleInputRange},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::scopeEncoderL},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_R, &ScopeApp::scopeEncoderR},
     {},
@@ -986,7 +988,8 @@ void ScopeApp::RenderScopeUI() const
   }
 
   // TOP ... [freq][trigger]
-  if (display_frequency_counter() && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type)
+  if (!channel_config_.linked() && display_frequency_counter() &&
+      TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type)
     DisplayFrequencyCounter(128 - 18, 0, main_ch.frequency());
 
   {
@@ -1067,7 +1070,8 @@ void ScopeApp::RenderScopeUI() const
   }
 
   // Info/debug overlay
-  if (display_stats_overlay()) {
+  auto stats_overlay = display_stats_overlay();
+  if (stats_overlay == 1) {
     weegfx::coord_t x = 64 - 48;
     weegfx::coord_t y = 8;
     graphics.setPrintPos(x, y);
@@ -1084,12 +1088,10 @@ void ScopeApp::RenderScopeUI() const
     y += 8;
     graphics.setPrintPos(x, y);
     graphics.write(main_ch.frequency(), 8);
+  } else if (stats_overlay == 2) {
+    graphics.setPrintPos(128 - 30, 64 - 16);
+    graphics.write(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
   }
-
-#ifdef SCOPE_DISPLAY_DRAW_CYCLES
-  graphics.setPrintPos(128 - 30, 64 - 16);
-  graphics.write(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
-#endif
 }
 
 void ScopeApp::DrawStatusBar() const
