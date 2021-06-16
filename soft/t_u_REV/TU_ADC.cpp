@@ -107,8 +107,13 @@ static void FASTRUN ADC_DMA_ISR()
 #define TU_ADC_DEBUG_PIN 12
   digitalWriteFast(TU_ADC_DEBUG_PIN, HIGH);
 #endif
+  static_assert(ADC::kDMAChunkCount == 2, "Double-buffering only");
+  auto read_buffer =
+      (uint32_t)dma_channel_adc.TCD->DADDR < (uint32_t)adc_dma_buffer + ADC::kDMAChunkSize
+          ? adc_dma_buffer + ADC::kDMAChunkSize
+          : adc_dma_buffer;
   dma_channel_adc.clearInterrupt();
-  ADC::BufferedModeISR();
+  ADC::BufferedModeISR(read_buffer);
 
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
   digitalWriteFast(TU_ADC_DEBUG_PIN, LOW);
@@ -401,25 +406,21 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
   }
 }
 
-/*static*/ void FASTRUN ADC::BufferedModeISR()
+/*static*/ void FASTRUN ADC::BufferedModeISR(const uint16_t* read_buffer)
 {
   if (chunk_buffers_.writeable()) {
-    ReadChunk(chunk_buffers_.writeable_frame());
+    ReadChunk(chunk_buffers_.writeable_frame(), read_buffer);
     chunk_buffers_.written();
   } else {
     dma_overflow_++;
   }
 }
 
-/*static*/ void ADC::ReadChunk(int16_t* buffer)
+/*static*/ void ADC::ReadChunk(int16_t* dst_buffer, const uint16_t* src_buffer)
 {
-  auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
-  auto chunk =
-      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAChunkCount / 2) % kDMAChunkCount;
-  auto src_buffer = adc_dma_buffer + chunk * kDMAChunkSize;
   auto src = (const uint32_t*)src_buffer;
   auto end = (const uint32_t*)(src_buffer + kDMAChunkSize);
-  auto dst = (uint32_t*)buffer;
+  auto dst = (uint32_t*)dst_buffer;
   while (src < end) { *dst++ = __SSUB16(packed_offsets_, *src++); }
 }
 

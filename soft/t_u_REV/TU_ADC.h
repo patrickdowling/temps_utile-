@@ -101,7 +101,7 @@ public:
   // BUFFERED_MODE
   static ChunkBuffers &chunk_buffers() { return chunk_buffers_; }
 
-  static void BufferedModeISR();
+  static void BufferedModeISR(const uint16_t *read_buffer);
 
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
@@ -184,7 +184,7 @@ private:
   static void StopPDB();
 
   // Read chunk of data, applying internal offset
-  static void ReadChunk(int16_t *buffer);
+  static void ReadChunk(int16_t *dst_buffer, const uint16_t *src_buffer);
 
   // Deprecated?
 public:

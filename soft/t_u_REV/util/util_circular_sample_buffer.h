@@ -35,19 +35,17 @@ public:
   using value_type = T;
   static constexpr size_t kBufferSize = buffer_size;
 
-  size_t write_pos() const { return write_pos_; }
-
   class Writer {
   public:
     Writer(CircularSampleBuffer *owner, T *buffer, size_t write_pos)
         : owner_(owner), buffer_(buffer), write_pos_(write_pos)
     {}
 
-    T &operator*() { return buffer_[write_pos_]; }
+    T &operator*() { return buffer_[write_pos_ % kBufferSize]; }
 
     Writer &operator++(int)
     {
-      write_pos_ = (write_pos_ + 1) % kBufferSize;
+      ++write_pos_;
       return *this;
     }
 
@@ -63,7 +61,7 @@ public:
 
   void Read(T *buffer, size_t length) const
   {
-    auto src = buffer_ + read_pos_;
+    auto src = buffer_ + (read_pos_ % kBufferSize);
     auto end = src + length;
     if (end > end_) {
       buffer = std::copy(src, end_, buffer);
@@ -76,7 +74,10 @@ public:
   size_t available() const { return write_pos_ - read_pos_; }
 
   void Consume() { read_pos_ = write_pos_; }
-  void SetReadPos(int32_t offset) { read_pos_ = (size_t)(write_pos_ + offset) % kBufferSize; }
+  void SetReadOffset(int32_t offset) { read_pos_ = (size_t)(write_pos_ + offset); }
+
+  size_t write_pos() const { return write_pos_; }
+  size_t read_pos() const { return read_pos_; }
 
 private:
   T buffer_[kBufferSize];

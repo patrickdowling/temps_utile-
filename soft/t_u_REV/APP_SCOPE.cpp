@@ -224,6 +224,7 @@ enum ScopeChannelSetting {
   SCOPE_CHANNEL_SETTING_YDIV,
   SCOPE_CHANNEL_SETTING_TRIG_TYPE,
   SCOPE_CHANNEL_SETTING_TRIG_LEVEL,
+  SCOPE_CHANNEL_SETTING_TRIG_HOLDOFF,
   SCOPE_CHANNEL_SETTING_LAST,
   SCOPE_CHANNEL_SETTING_FIRST = SCOPE_CHANNEL_SETTING_XOFF,
 };
@@ -267,6 +268,8 @@ public:
     return static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
   }
 
+  int trigger_holdoff() const { return get_value(SCOPE_CHANNEL_SETTING_TRIG_HOLDOFF); }
+
   const TimebaseParameters &timebase() const { return kTimebaseParameters[xdiv()]; }
   const ScalingParameters &scaling() const { return kScalingParameters[ydiv()]; }
 
@@ -290,6 +293,7 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
      scope::TriggerProcessor::TRIGGER_TYPE_LAST - 1, "TRIG TYPE", scope::kTriggerTypeStrings,
      settings::STORAGE_TYPE_U8},
     {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
+    {8, 0, 64, "TRIG HOLD", nullptr, settings::STORAGE_TYPE_U8},
 };
 
 void ScopeChannel::Init()
@@ -380,7 +384,7 @@ private:
   const int16_t *current_display_buffer_ = nullptr;
   ScopeChannel channels_[kNumChannels];
 
-  using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 8>;
+  using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 4>;
   using DisplayBuffers = util::FrameBuffer<kDisplayBufferSize, 2, int16_t>;
 
   static CircularSampleBuffer sample_buffer_;
@@ -484,31 +488,28 @@ void ScopeApp::Process()
     sample_writer.Commit();
 
     // Trigger/display buffer handling
-    size_t read_length = kDisplayBufferSize;
-
+    size_t read_length = 0;
     if (trigger_state_.triggered) {
       if (sample_buffer_.available() < kDisplayBufferSize) {
-        // still accumulating
-        read_length = 0;
+        // still accumulating (doesn't happen, since we got more data to get here)
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
-        trigger_state_.holdoff = 16;
+        trigger_state_.holdoff = main_channel().trigger_holdoff();
+        read_length = kDisplayBufferSize;
       }
     } else {
       if (trigger_state_.holdoff) {
         --trigger_state_.holdoff;
-        read_length = 0;
-        sample_buffer_.Consume();
       } else {
         if (trigger < kADCChunkSize) {
           trigger_state_.triggered = true;
           auto n = kADCChunkSize - trigger;
-          sample_buffer_.SetReadPos(-n - kDisplayBufferSize / 2);
-          read_length = 0;  // kDisplayBufferSize / 2;
+          sample_buffer_.SetReadOffset(-n /* - kDisplayBufferSize / 2*/);
         } else {
           trigger_lost = kTriggerLostIndicatorTimeoutTicks;
-          sample_buffer_.SetReadPos(-kDisplayBufferSize);
+          sample_buffer_.SetReadOffset(-kDisplayBufferSize);
+          read_length = kDisplayBufferSize;
         }
       }
     }
