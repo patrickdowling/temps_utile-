@@ -98,6 +98,9 @@ public:
   // Print right-aligned string at current print pos; print pos is unchanged
   void print_right(const char *);
 
+  // Write right-aligned string at current print pos; print pos is unchanged
+  void write_right(const char *);
+
   // Print string at absolute coords, doesn't move print pos
   void drawStr(coord_t x, coord_t y, const char *str);
 

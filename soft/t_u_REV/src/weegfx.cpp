@@ -606,6 +606,18 @@ void Graphics::print_right(const char *s)
   }
 }
 
+void Graphics::write_right(const char *s)
+{
+  auto x = text_x_;
+  auto y = text_y_;
+  auto c = s;
+  while (*c) ++c;
+  while (c > s) {
+    x -= kFixedFontW;
+    blit_char<PIXEL_OP_SRC>(*--c, x, y);
+  }
+}
+
 void Graphics::printf(const char *fmt, ...)
 {
   va_list args;

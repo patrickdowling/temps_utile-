@@ -506,7 +506,7 @@ void ScopeApp::Process()
         if (trigger < kADCChunkSize) {
           trigger_state_.triggered = true;
           auto n = kADCChunkSize - trigger;
-          sample_buffer_.SetReadOffset(-n /* - kDisplayFrameSize / 2*/);
+          sample_buffer_.SetReadOffset(-n - kDisplayFrameSize / 2);
         } else {
           trigger_lost = kTriggerLostIndicatorTimeoutTicks;
           sample_buffer_.SetReadOffset(-kDisplayFrameSize);
@@ -841,7 +841,6 @@ static const uint8_t trigger_ext1_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0
 static const uint8_t trigger_ext2_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x74, 0x5c};
 
 static const uint8_t trigger_lost_6x8[] = {0x00, 0x02, 0x01, 0x51, 0x09, 0x06};
-
 static const uint8_t trigger_level_3x8[] = {0x3e, 0x1c, 0x08};
 
 static constexpr const uint8_t *channels[4] = {
@@ -863,6 +862,8 @@ const uint8_t edit_indicators_8[3 * 3] = {
 
 const uint8_t unit_ms_8[] = {0x78, 0x18, 0x78, 0x00, 0x58, 0x68};
 const uint8_t unit_us_8[] = {0xf8, 0x40, 0x78, 0x00, 0x58, 0x68};
+const uint8_t unit_khz_8[] = {0x00, 0x7c, 0x10, 0x68, 0x00,  // hz ->
+                              0x7e, 0x08, 0x08, 0x7e, 0x00, 0x48, 0x68, 0x58};
 
 inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
                          const settings::value_attr &attr)
@@ -889,16 +890,32 @@ void ScopeApp::RenderScopeUI() const
     CONSTRAIN(y, 0, 8);
     graphics.writeBitmap8(3, y, 7, icons::channels[channel_index]);
   }
-  if (get_value(SCOPE_APP_SETTING_FREQ)) {
-    graphics.setPrintPos(128 - weegfx::kFixedFontW * 5 - 18, 0);
+
+  auto trigger_type = channel.trigger_type();
+
+  if (get_value(SCOPE_APP_SETTING_FREQ) && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
+    weegfx::coord_t x = 128 - 18;
+    weegfx::coord_t y = 0;
+    weegfx::coord_t w = sizeof(icons::unit_khz_8);
+    auto unit = icons::unit_khz_8;
+
     auto freq = channel.frequency();
-    if (freq)
-      graphics.write(channel.frequency(), 5);
-    else
-      graphics.print("-----");
+    char freq_str[16] = "-";
+    if (freq > 1000) {
+      auto khz = freq / 1000;
+      sprintf(freq_str, "%lu.%.02lu", khz, ((freq - (khz * 1000))) / 10);
+    } else if (freq) {
+      sprintf(freq_str, "%lu", freq);
+      unit += 4;
+      w -= 4;
+    }
+    x -= w;
+    graphics.setPrintPos(x, y);
+    graphics.write_right(freq_str);
+    graphics.writeBitmap8(x + 1, y, w, unit);
   }
 
-  const uint8_t *icon = icons::trigger_type_icons[channel.trigger_type()];
+  const uint8_t *icon = icons::trigger_type_icons[trigger_type];
   weegfx::coord_t x = 128 - 8;
   if (icon) {
     graphics.writeBitmap8(x, 0, 8, icon);
@@ -908,7 +925,7 @@ void ScopeApp::RenderScopeUI() const
 
   // Left: Trigger level
   auto trigger_level_y = to_pixel(channel.trigger_level(), channel.scaling().multiplier) - 3;
-  if (TriggerProcessor::TRIGGER_TYPE_NONE != channel.trigger_type()) {
+  if (TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
     CONSTRAIN(trigger_level_y, 0, 58);
     graphics.writeBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
   }
@@ -967,16 +984,22 @@ void ScopeApp::RenderScopeUI() const
 
   // Info/debug overlay
   if (ui_.info_overlay.visible()) {
-    weegfx::coord_t x = 48;
+    weegfx::coord_t x = 64 - 48;
     weegfx::coord_t y = 8;
     graphics.setPrintPos(x, y);
     graphics.write(channel.stats().trigger_count & 0xffff, 8);
 
-    graphics.movePrintPos(0, 8);
+    y += 8;
+    graphics.setPrintPos(x, y);
     graphics.write(channel.stats().sample_count, 8);
 
-    graphics.movePrintPos(0, 8);
+    y += 8;
+    graphics.setPrintPos(x, y);
     graphics.write(debug::cycles_to_us(process_cycles.value()), 8);
+
+    y += 8;
+    graphics.setPrintPos(x, y);
+    graphics.write(channel.frequency(), 8);
   }
 
 #ifdef SCOPE_DISPLAY_DRAW_CYCLES
