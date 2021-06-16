@@ -420,6 +420,10 @@ private:
     int holdoff = 0;
   } trigger_state_;
 
+  struct {
+    uint32_t skipped_frames_ = 0;
+  } debug_;
+
   // The channel configuration is packed into an int so access within ISR is atomic.
   // We're relying on the fact that channel index = ADC channel
   // Still tempted to just use a union, even if technically UB.
@@ -452,11 +456,13 @@ private:
   using DisplayFrame = DisplayFrameBuffer::Frame;
   using SampleDecimator = util::SampleDecimator<kADCChunkSize>;
 
-  const DisplayFrame *current_display_frame_ = nullptr;
   ScopeChannel channels_[kNumChannels];
 
   static CircularSampleBuffer sample_buffer_;
   static DisplayFrameBuffer display_frame_buffer_;
+
+  static int16_t display_buffer_[kDisplayFrameSize];
+  static DisplayFrame current_display_frame_;
 
   const ScopeChannel &main_channel() const { return channels_[channel_config_.main()]; }
   ScopeChannel &main_channel() { return channels_[channel_config_.main()]; }
@@ -511,6 +517,8 @@ private:
 
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
 /*static*/ ScopeApp::DisplayFrameBuffer ScopeApp::display_frame_buffer_ __attribute__((aligned(4)));
+/*static*/ int16_t ScopeApp::display_buffer_[kDisplayFrameSize] __attribute__((aligned(4)));
+/*static*/ ScopeApp::DisplayFrame ScopeApp::current_display_frame_{display_buffer_, {1, 0}};
 
 static const char *const stats_overlay_strings[] = {"off", "proc", "draw"};
 
@@ -541,7 +549,7 @@ void ScopeApp::Process()
 
   const auto channel_config = channel_config_;
   auto &channel = channels_[channel_config.main()];
-  auto timebase = channel.timebase();
+  auto &timebase = channel.timebase();
 
   auto &adc_chunks = TU::ADC::chunk_buffers();
   while (adc_chunks.readable()) {
@@ -563,13 +571,15 @@ void ScopeApp::Process()
     sample_writer.Commit();
 
     // Trigger/display buffer handling
+    size_t available = sample_buffer_.available();
     size_t read_length = 0;
     if (trigger_state_.triggered) {
-      if (sample_buffer_.available() < kDisplayFrameSize) {
+      if (available < kDisplayFrameSize) {
         // still accumulating. This should generally only happen if decimating, otherwise the new
-        // data in this pass should have filled the buffer. So if decimation > 1, display partial
-        // buffers (since that's likely slow update rate).
-        if (timebase.decimate > 1) read_length = sample_buffer_.available();
+        // data in this pass should have filled the buffer. So if decimation > 1, we might display
+        // partial buffers (since that's likely slow update rate), but this has some flickery
+        // effects.
+        if (timebase.decimate > 1) read_length = available;
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
@@ -581,10 +591,11 @@ void ScopeApp::Process()
         --trigger_state_.holdoff;
       } else {
         if (trigger < kADCChunkSize) {
-          if (timebase.decimate) trigger /= timebase.decimate;
           trigger_state_.triggered = true;
           auto n = kADCChunkSize - trigger;
+          if (timebase.decimate) n /= timebase.decimate;
           sample_buffer_.SetReadOffset(-n - kDisplayFrameSize / 2);
+          if (timebase.decimate > 1) read_length = kDisplayFrameSize / 2;
         } else {
           // This provides a scrolling view
           trigger_lost = kTriggerLostIndicatorTimeoutTicks;
@@ -594,13 +605,18 @@ void ScopeApp::Process()
       }
     }
 
-    if (read_length && display_frame_buffer_.writeable()) {
-      auto frame = display_frame_buffer_.writeable_frame();
-      sample_buffer_.Read(frame->buffer, read_length);
-      frame->info.num_channels = channel_config.linked() ? 2 : 1;
-      frame->info.length = read_length;
-      display_frame_buffer_.written();
+    if (read_length) {
+      if (display_frame_buffer_.writeable()) {
+        auto frame = display_frame_buffer_.writeable_frame();
+        sample_buffer_.Read(frame->buffer, read_length);
+        frame->info.num_channels = channel_config.linked() ? 2 : 1;
+        frame->info.length = read_length;
+        display_frame_buffer_.written();
+      } else {
+        ++debug_.skipped_frames_;
+      }
     }
+    // if (available >= kDisplayFrameSize) sample_buffer_.Consume(kDisplayFrameSize);
   }
 
   // Other regular book-keeping?
@@ -867,9 +883,17 @@ void ScopeApp::EventScreensaverOff()
 
 void ScopeApp::UpdateDisplayBuffer()
 {
-  if (display_frame_buffer_.readable()) {
-    if (current_display_frame_) display_frame_buffer_.read();
-    current_display_frame_ = display_frame_buffer_.readable_frame();
+  auto readable = display_frame_buffer_.readable();
+  while (readable > 1) {
+    display_frame_buffer_.read();
+    --readable;
+  }
+  if (readable) {
+    // TODO If length < kDisplayFrameSize, we could do an overwrite effect instead of copy
+    auto frame = display_frame_buffer_.readable_frame();
+    current_display_frame_.info = frame->info;
+    memcpy(display_buffer_, frame->buffer, frame->info.length * 2);
+    display_frame_buffer_.read();
   }
 }
 
@@ -920,19 +944,16 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier,
 
 void ScopeApp::RenderDisplayBuffer() const
 {
-  auto frame = current_display_frame_;
-  if (frame) {
-    auto length = frame->info.length;
+  auto length = current_display_frame_.info.length;
 
-    if (frame->info.num_channels > 1) {
-      DrawWaveform(frame->buffer, length, 2, main_channel().scaling().multiplier,
-                   main_channel().screen_yoffset());
-      DrawWaveform(frame->buffer + 1, length, 2, aux_channel().scaling().multiplier,
-                   aux_channel().screen_yoffset());
-    } else {
-      DrawWaveform(frame->buffer, length, 1, main_channel().scaling().multiplier,
-                   main_channel().screen_yoffset());
-    }
+  if (current_display_frame_.info.num_channels > 1) {
+    DrawWaveform(current_display_frame_.buffer, length, 2, main_channel().scaling().multiplier,
+                 main_channel().screen_yoffset());
+    DrawWaveform(current_display_frame_.buffer + 1, length, 2, aux_channel().scaling().multiplier,
+                 aux_channel().screen_yoffset());
+  } else {
+    DrawWaveform(current_display_frame_.buffer, length, 1, main_channel().scaling().multiplier,
+                 main_channel().screen_yoffset());
   }
 }
 
@@ -1156,6 +1177,10 @@ void ScopeApp::RenderScopeUI() const
     y += 8;
     graphics.setPrintPos(x, y);
     graphics.write(main_ch.frequency(), 8);
+
+    y += 8;
+    graphics.setPrintPos(x, y);
+    graphics.write(debug_.skipped_frames_, 8);
   } else if (stats_overlay == 2) {
     graphics.setPrintPos(128 - 30, 64 - 16);
     graphics.write(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);

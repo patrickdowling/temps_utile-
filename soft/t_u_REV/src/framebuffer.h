@@ -29,6 +29,9 @@ struct FrameImpl {
 template <typename T, typename InfoType>
 struct FrameType : public FrameImpl<T> {
   InfoType info = {};
+
+  constexpr FrameType() = default;
+  constexpr FrameType(T *b, const InfoType &i) : FrameImpl<T>{b}, info(i) {}
 };
 
 template <typename T>
