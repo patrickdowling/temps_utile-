@@ -65,14 +65,14 @@ public:
     TRIGGER_TYPE_LAST
   };
 
-  template <size_t buffer_length>
+  template <size_t buffer_length, int stride>
   static const int16_t *Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
   {
     using Impl = const int16_t *(*)(int16_t, const int16_t *);
     static constexpr Impl processors[TRIGGER_TYPE_LAST] = {
         Nop<buffer_length>,
-        FindEdge<buffer_length, std::greater<int16_t>>,  // rising
-        FindEdge<buffer_length, std::less<int16_t>>,     // falling
+        FindEdge<buffer_length, stride, std::greater<int16_t>>,  // rising
+        FindEdge<buffer_length, stride, std::less<int16_t>>,     // falling
         Nop<buffer_length>,
         Nop<buffer_length>,
     };
@@ -86,16 +86,16 @@ private:
     return nullptr;
   }
 
-  template <size_t buffer_length, typename cmp>
+  template <size_t buffer_length, int stride, typename cmp>
   static const int16_t *FindEdge(int16_t threshold, const int16_t *buffer)
   {
     auto end = buffer + buffer_length;
     // ignore starting values that match
-    while (buffer < end && cmp{}(buffer[0], threshold)) ++buffer;
+    while (buffer < end && cmp{}(buffer[0], threshold)) buffer += stride;
     // find first value that matches
     while (buffer < end) {
       if (cmp{}(buffer[0], threshold)) return buffer;
-      ++buffer;
+      buffer += stride;
     }
     return nullptr;
   }
@@ -172,11 +172,12 @@ class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_S
 public:
   void Init();
 
-  template <typename T>
-  const int16_t *Process(const T &sample_buffer)
+  template <size_t buffer_length, int stride>
+  const int16_t *Process(const int16_t *buffer)
   {
-    auto head = sample_buffer.head_buffer();
-    auto trigger = TriggerProcessor::Process<T::kChunkSize>(trigger_type(), trigger_level(), head);
+    auto head = buffer;
+    auto trigger =
+        TriggerProcessor::Process<buffer_length, stride>(trigger_type(), trigger_level(), head);
     if (trigger) ++trigger_count_;
     return trigger;
   }
@@ -390,14 +391,15 @@ void ScopeApp::Process()
 #endif
     sample_buffer_.advance();
 
-    auto trigger = current_channel().Process(sample_buffer_);
+    auto head = sample_buffer_.head_buffer();
+    auto trigger = current_channel().Process<kADCChunkSize, 1>(head);
     size_t trigger_offset;
     if (!trigger) {
       trigger_lost = kTriggerLostIndicatorTimeoutTicks;
       trigger_offset = 0;
     } else {
       // trigger_lost = 0;
-      trigger_offset = trigger - sample_buffer_.head_buffer();
+      trigger_offset = trigger - head;
     }
 
     if (display_buffers_.writeable()) {
