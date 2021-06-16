@@ -136,7 +136,7 @@ enum Scaling {
   DIV_LAST,
 };
 
-static constexpr int32_t kScalingShift = 8;
+static constexpr int32_t kScalingShift = 10;  // \sa to_pixel
 struct ScalingParameters {
   const char *label;
   int32_t multiplier;
@@ -702,7 +702,8 @@ void ScopeApp::RenderMenu() const
 
 static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
 {
-  auto px = 32 - ((multiplier * value) >> (kScalingShift + 6));
+  // kScalingShift = 10 + /64 = >>16
+  auto px = 32 - signed_multiply_32x16b(multiplier, value);
   CONSTRAIN(px, 0, 63);
   return px;
 }
