@@ -2553,6 +2553,7 @@ void CLOCKS_handleAppEvent(TU::AppEvent event) {
     break;
     case TU::APP_EVENT_ACTIVATE:
       TU::ADC::StartConversionNormal();
+      TU::DigitalInputs::EnableInterrupts();
     break;
     default:
     break;

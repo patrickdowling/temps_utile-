@@ -29,6 +29,7 @@
 
 #include "TU_ADC.h"
 #include "TU_debug.h"
+#include "TU_digital_inputs.h"
 #include "TU_menus.h"
 #include "TU_strings.h"
 #include "TU_ui.h"
@@ -78,10 +79,13 @@ public:
         &TriggerProcessor::Nop<buffer_length>,
         &TriggerProcessor::FindEdges<buffer_length, stride, std::greater<int16_t>>,  // rising
         &TriggerProcessor::FindEdges<buffer_length, stride, std::less<int16_t>>,     // falling
-        &TriggerProcessor::Nop<buffer_length>,
-        &TriggerProcessor::Nop<buffer_length>,
+        &TriggerProcessor::FindEdges<buffer_length, stride>,
+        &TriggerProcessor::FindEdges<buffer_length, stride>,
     };
-    return (this->*processors[trigger_type])(threshold, buffer);
+
+    auto trigger_offset = (this->*processors[trigger_type])(threshold, buffer);
+    stats_.sample_count += buffer_length;
+    return trigger_offset;
   }
 
   struct Stats {
@@ -108,7 +112,6 @@ private:
   template <size_t buffer_length>
   TriggerOffset Nop(int16_t, const int16_t *buffer)
   {
-    stats_.sample_count += buffer_length;
     edge_detector_state_ = 0;
     return buffer_length;
   }
@@ -118,7 +121,7 @@ private:
   {
     auto buf = buffer;
     auto end = buffer + buffer_length;
-    auto edge_count = stats_.edge_count;
+    uint32_t edge_count = 0;
     const int16_t *first_edge = nullptr;
 
     EdgeDetector edge_detector{threshold, edge_detector_state_};
@@ -132,8 +135,7 @@ private:
       buf += stride;
     } while (buf < end);
 
-    stats_.sample_count += buffer_length;
-    stats_.edge_count = edge_count;
+    stats_.edge_count += edge_count;
     edge_detector_state_ = edge_detector.state();
 
     if (first_edge) {
@@ -142,6 +144,25 @@ private:
     } else {
       return buffer_length;
     }
+  }
+
+  template <size_t buffer_length, int stride>
+  TriggerOffset FindEdges(int16_t threshold, const int16_t *buffer)
+  {
+    auto buf = buffer;
+    auto end = buffer + buffer_length;
+    uint32_t edge_count = 0;
+
+    EdgeDetector edge_detector{threshold, edge_detector_state_};
+    do {
+      edge_detector.Update<std::greater<int16_t>>(buf[0]);
+      if (edge_detector.rising_edge()) ++edge_count;
+
+      buf += stride;
+    } while (buf < end);
+
+    stats_.edge_count += edge_count;
+    return buffer_length;
   }
 };
 
@@ -230,10 +251,10 @@ public:
   void Init();
 
   template <size_t buffer_length, int stride>
-  TriggerProcessor::TriggerOffset Process(const int16_t *buffer)
+  TriggerProcessor::TriggerOffset Process(const TU::ADC::Chunk *chunk)
   {
-    auto trigger =
-        trigger_processor_.Process<buffer_length, stride>(trigger_type(), trigger_level(), buffer);
+    auto trigger = trigger_processor_.Process<buffer_length, stride>(
+        trigger_type(), trigger_level(), chunk->buffer);
 
     auto &stats = trigger_processor_.stats();
     if (stats.sample_count >= timebase().adc_frequency) {
@@ -241,7 +262,17 @@ public:
       trigger_processor_.ResetEdgeCounter();
     }
 
-    return trigger;
+    if (TriggerProcessor::TRIGGER_TYPE_EXT1 == trigger_type() ||
+        TriggerProcessor::TRIGGER_TYPE_EXT2 == trigger_type()) {
+      if (0xffff != chunk->info.ext_trigger_offset) {
+        // SERIAL_PRINTLN("%04x", chunk->info.ext_trigger_offset);
+        return chunk->info.ext_trigger_offset;
+      } else {
+        return buffer_length;
+      }
+    } else {
+      return trigger;
+    }
   }
 
   const TriggerProcessor::Stats stats() const { return trigger_processor_.stats(); }
@@ -468,11 +499,11 @@ void ScopeApp::Process()
   while (adc_chunks.readable()) {
     debug::ScopedCycleMeasurement cycles{process_cycles};
 
-    auto adc_chunk_buffer = adc_chunks.readable_frame();
+    auto adc_chunk = adc_chunks.readable_frame();
 
     // Process input buffer; if already triggered we don't really need to find a new one yet but
     // this might handle more than just triggers eventually
-    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer->buffer);
+    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk);
 
     auto sample_writer = sample_buffer_.writer();
 #if 0
@@ -482,7 +513,7 @@ void ScopeApp::Process()
     // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
 #else
     // TODO without decimation, this step is somewhat moot
-    for (auto src = adc_chunk_buffer->buffer, end = src + kADCChunkSize; src < end; ++src)
+    for (auto src = adc_chunk->buffer, end = src + kADCChunkSize; src < end; ++src)
       *sample_writer++ = *src;
 #endif
     adc_chunks.read();
@@ -1011,6 +1042,7 @@ void ScopeApp::RenderScopeUI() const
 void ScopeApp::Activate()
 {
   ConfigureADC();
+  TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_1);
 }
 
 static ScopeApp scope_app_instance;

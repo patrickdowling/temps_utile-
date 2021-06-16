@@ -88,11 +88,13 @@ static constexpr ADC::Config kConfigBuffered = {
 // CV1 (17) = A3 = 0x49; CV2 (20) = A6 = 0x46; CV3 (19) = A5 = 0x4C; CV4 (18) = A4 = 0x4D
 static constexpr uint16_t SCA_CHANNEL_ID[ADC_CHANNEL_LAST] = {0x49, 0x46, 0x4C, 0x4D};
 
-DMAMEM static uint16_t adc_mux_buffer[ADC_CHANNEL_LAST] __attribute__((aligned(4)));
-DMAMEM static uint16_t adc_dma_buffer[ADC::kDMABufferSize] __attribute__((aligned(4)));
+DMAMEM static uint16_t dma_buffer_mux[ADC_CHANNEL_LAST] __attribute__((aligned(4)));
+DMAMEM static uint16_t dma_buffer_adc[ADC::kDMABufferSize] __attribute__((aligned(4)));
+DMAMEM static uint16_t dma_buffer_ext[1] __attribute__((aligned(4)));
 
 static DMAChannel dma_channel_mux{false};  // buffer which holds the channel/pin IDs -> ADC0_SC1A
 static DMAChannel dma_channel_adc{false};  // ADC0_RA -> buffer
+static DMAChannel dma_channel_ext{false};  // DADDR -> buffer
 
 // Maintain basic DMA settings for each mode for "easy" switching.
 // This doesn't include some things like linking, which we have to setup manually.
@@ -108,12 +110,16 @@ static void FASTRUN ADC_DMA_ISR()
   digitalWriteFast(TU_ADC_DEBUG_PIN, HIGH);
 #endif
   static_assert(ADC::kDMAChunkCount == 2, "Double-buffering only");
+
+  uint16_t ext_trigger_address = dma_buffer_ext[0];
+  dma_buffer_ext[0] = 0xffff;
+
   auto read_buffer =
-      (uint32_t)dma_channel_adc.TCD->DADDR < (uint32_t)adc_dma_buffer + ADC::kDMAChunkSize
-          ? adc_dma_buffer + ADC::kDMAChunkSize
-          : adc_dma_buffer;
+      (uint32_t)dma_channel_adc.TCD->DADDR < (uint32_t)dma_buffer_adc + ADC::kDMAChunkSize
+          ? dma_buffer_adc + ADC::kDMAChunkSize
+          : dma_buffer_adc;
   dma_channel_adc.clearInterrupt();
-  ADC::BufferedModeISR(read_buffer);
+  ADC::BufferedModeISR(read_buffer, ext_trigger_address);
 
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
   digitalWriteFast(TU_ADC_DEBUG_PIN, LOW);
@@ -125,15 +131,19 @@ static void FASTRUN ADC_DMA_ISR()
   calibration_data_ = calibration_data;
   std::fill(raw_, raw_ + ADC_CHANNEL_LAST, 0);
   std::fill(smoothed_, smoothed_ + ADC_CHANNEL_LAST, 0);
-  std::fill(adc_dma_buffer, adc_dma_buffer + kDMABufferSize, 0);
+  std::fill(dma_buffer_adc, dma_buffer_adc + kDMABufferSize, 0);
+  std::fill(dma_buffer_ext, dma_buffer_ext + 1, 0);
 
   adc_.setReference(ADC_REF_3V3);
   (void)adc_.analogRead(CV1, 0);
 
-  dma_channel_mux.begin(true);  // allocate the DMA channel
-  dma_channel_adc.begin(true);  // allocate the DMA channel
+  // Allocate DMA channels
+  dma_channel_mux.begin(true);
+  dma_channel_adc.begin(true);
+  dma_channel_ext.begin(true);
   ADC_SERIAL_PRINTLN("dma_channel_mux.channel=%x", dma_channel_mux.channel);
   ADC_SERIAL_PRINTLN("dma_channel_adc.channel=%x", dma_channel_adc.channel);
+  ADC_SERIAL_PRINTLN("dma_channel_ext.channel=%x", dma_channel_ext.channel);
 
   dma_channel_adc.triggerAtHardwareEvent(DMAMUX_SOURCE_ADC0);
 #ifdef TU_ADC_DEBUG_PIN
@@ -166,7 +176,7 @@ static void FASTRUN ADC_DMA_ISR()
   static constexpr unsigned int buffer_size = (num_channels * num_samples);
   static_assert(buffer_size <= kDMABufferSize, "DMA buffer too small for normal mode");
 
-  dma_settings_normal[0].sourceBuffer(adc_mux_buffer, 2 * num_channels);
+  dma_settings_normal[0].sourceBuffer(dma_buffer_mux, 2 * num_channels);
   dma_settings_normal[0].destination(*(volatile uint16_t*)&ADC0_SC1A);
 
   auto tcd = dma_settings_normal[1].TCD;
@@ -175,11 +185,11 @@ static void FASTRUN ADC_DMA_ISR()
   tcd->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
   tcd->NBYTES = 2;
   tcd->SLAST = 0;
-  tcd->DADDR = adc_dma_buffer;
+  tcd->DADDR = dma_buffer_adc;
   tcd->DOFF = 2;
   tcd->CITER = tcd->BITER = buffer_size | DMA_TCD_BITER_ELINKYES_ELINK |
                             DMA_TCD_BITER_ELINKYES_LINKCH(dma_channel_mux.channel);
-  tcd->CSR = DMA_TCD_CSR_MAJORELINK | DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel);
+  tcd->CSR = DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel) | DMA_TCD_CSR_MAJORELINK;
   tcd->CSR |= DMA_TCD_CSR_DREQ;
 #ifdef TU_ADC_ENABLE_DEBUG_ISR
   // tcd->CSR |= DMA_TCD_CSR_INTMAJOR; // TODO ISR not normally enabled for this mode
@@ -196,7 +206,7 @@ static void FASTRUN ADC_DMA_ISR()
     StopDMA();
     Configure(kConfigNormal);
 
-    std::copy(SCA_CHANNEL_ID, SCA_CHANNEL_ID + ADC_CHANNEL_LAST, adc_mux_buffer);
+    std::copy(SCA_CHANNEL_ID, SCA_CHANNEL_ID + ADC_CHANNEL_LAST, dma_buffer_mux);
     StartDMA(ADC_MODE_NORMAL, dma_settings_normal);
   }
 }
@@ -209,23 +219,45 @@ static void FASTRUN ADC_DMA_ISR()
   unsigned int num_samples = kDMABufferSize;
 
   auto& mux = dma_settings_buffered[0];
-  mux.sourceBuffer(adc_mux_buffer, 2 * num_channels);
+  mux.sourceBuffer(dma_buffer_mux, 2 * num_channels);
   mux.destination(*(volatile uint16_t*)&ADC0_SC1A);
 
-  // These are a bit more complex since we want to link them
   auto tcd = dma_settings_buffered[1].TCD;
   tcd->SADDR = &ADC0_RA;
   tcd->SOFF = 0;
   tcd->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
   tcd->NBYTES = 2;
   tcd->SLAST = 0;
-  tcd->DADDR = adc_dma_buffer;
+  tcd->DADDR = dma_buffer_adc;
   tcd->DOFF = 2;
   tcd->CITER = tcd->BITER = num_samples | DMA_TCD_BITER_ELINKYES_LINKCH(dma_channel_mux.channel) |
                             DMA_TCD_BITER_ELINKYES_ELINK;
   tcd->CSR = DMA_TCD_CSR_MAJORLINKCH(dma_channel_mux.channel) | DMA_TCD_CSR_MAJORELINK;
   tcd->CSR |= DMA_TCD_CSR_INTHALF | DMA_TCD_CSR_INTMAJOR;
   tcd->DLASTSGA = -(2 * num_samples);
+
+  // Ok, so in a bad case of leaky abstractions we want to be able to sync the TR inputs with the
+  // ADC conversion. Those inputs don't seem to connect to much, but we can trigger a DMA transfer
+  // on rising/falling edges. So, the idea is to set up a DMA channel to transfer the current sample
+  // number to a buffer, then disable the DMA. In the processing ISR, we know what buffer we just
+  // read and can figure out at which sample the TR was tr'ed.
+  //
+  // For some reason, reading a dword from the DADDR causes DMA to hang. A word works fine and since
+  // we're only intersted in the lower bits anyway, this works? Alternatively, we can use the CITER
+  // register.
+
+  tcd = dma_channel_ext.TCD;
+  tcd->SADDR = &dma_channel_adc.TCD->DADDR;  // DMA_TCD1_DADDR;
+  tcd->SOFF = 0;
+  tcd->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
+  tcd->NBYTES = 2;
+  tcd->SLAST = 0;
+  tcd->DADDR = dma_buffer_ext;
+  tcd->DOFF = 2;
+  tcd->CITER = tcd->BITER = 1;
+  tcd->DLASTSGA = -2;
+
+  dma_channel_ext.triggerAtHardwareEvent(DMAMUX_SOURCE_PORTB);
 }
 
 /*static*/ void ADC::StartConversionBuffered(uint32_t freq, ADC_CHANNEL channel1,
@@ -241,12 +273,12 @@ static void FASTRUN ADC_DMA_ISR()
   if (configure_adc) Configure(kConfigBuffered);
 
   unsigned int num_channels = 1;
-  adc_mux_buffer[0] = SCA_CHANNEL_ID[channel1];
+  dma_buffer_mux[0] = SCA_CHANNEL_ID[channel1];
   if (ADC_CHANNEL_LAST != channel2) {
-    adc_mux_buffer[1] = SCA_CHANNEL_ID[channel2];
+    dma_buffer_mux[1] = SCA_CHANNEL_ID[channel2];
     ++num_channels;
   }
-  dma_settings_buffered[0].sourceBuffer(adc_mux_buffer, 2 * num_channels);
+  dma_settings_buffered[0].sourceBuffer(dma_buffer_mux, 2 * num_channels);
 
   auto offset1 = channel_offset(channel1);
   auto offset2 = num_channels > 1 ? channel_offset(channel2) : offset1;
@@ -256,6 +288,10 @@ static void FASTRUN ADC_DMA_ISR()
   dma_channel_adc.attachInterrupt(ADC_DMA_ISR);
   StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
   StartPDB(freq);
+
+  dma_buffer_ext[0] = 0xffff;
+  dma_channel_ext.clearComplete();
+  dma_channel_ext.enable();
 }
 
 /*static*/ void ADC::StopDMA()
@@ -267,6 +303,7 @@ static void FASTRUN ADC_DMA_ISR()
     adc_.disableDMA();
     dma_channel_mux.disable();
     dma_channel_adc.disable();
+    dma_channel_ext.disable();
     dma_channel_adc.clearComplete();
 
     mode_ = ADC_MODE_INVALID;
@@ -384,21 +421,21 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
   if (ADC_MODE_NORMAL == mode_) {
     if (dma_channel_adc.complete()) {
       dma_channel_adc.clearComplete();
-      // Update channel values from adc_dma_buffer; there's 4 samples per channel in the buffer so
+      // Update channel values from dma_buffer_adc; there's 4 samples per channel in the buffer so
       // we can average the values.
       uint32_t value;
-      value = (adc_dma_buffer[0] + adc_dma_buffer[4] + adc_dma_buffer[8] + adc_dma_buffer[12]) >> 2;
+      value = (dma_buffer_adc[0] + dma_buffer_adc[4] + dma_buffer_adc[8] + dma_buffer_adc[12]) >> 2;
       update<ADC_CHANNEL_1>(value);
 
-      value = (adc_dma_buffer[1] + adc_dma_buffer[5] + adc_dma_buffer[9] + adc_dma_buffer[13]) >> 2;
+      value = (dma_buffer_adc[1] + dma_buffer_adc[5] + dma_buffer_adc[9] + dma_buffer_adc[13]) >> 2;
       update<ADC_CHANNEL_2>(value);
 
       value =
-          (adc_dma_buffer[2] + adc_dma_buffer[6] + adc_dma_buffer[10] + adc_dma_buffer[14]) >> 2;
+          (dma_buffer_adc[2] + dma_buffer_adc[6] + dma_buffer_adc[10] + dma_buffer_adc[14]) >> 2;
       update<ADC_CHANNEL_3>(value);
 
       value =
-          (adc_dma_buffer[3] + adc_dma_buffer[7] + adc_dma_buffer[11] + adc_dma_buffer[15]) >> 2;
+          (dma_buffer_adc[3] + dma_buffer_adc[7] + dma_buffer_adc[11] + dma_buffer_adc[15]) >> 2;
       update<ADC_CHANNEL_4>(value);
 
       dma_channel_adc.enable();  // disableOnCompletion -> need to restart
@@ -406,14 +443,20 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
   }
 }
 
-/*static*/ void FASTRUN ADC::BufferedModeISR(const uint16_t* read_buffer)
+/*static*/ void FASTRUN ADC::BufferedModeISR(const uint16_t* read_buffer,
+                                             uint16_t ext_trigger_address)
 {
   // Another option would be to use yet-another-DMA channel to copy the data (async?) and do the
   // offset processing "later", i.e. when the buffer gets used.
-
   if (chunk_buffers_.writeable()) {
     auto chunk = chunk_buffers_.writeable_frame();
     ReadChunk(chunk->buffer, read_buffer);
+
+    uint16_t addr = (uint32_t)read_buffer & 0xffff;
+    if (ext_trigger_address >= addr && ext_trigger_address < addr + 2 * kDMAChunkSize)
+      chunk->info.ext_trigger_offset = ext_trigger_address - addr;
+    else
+      chunk->info.ext_trigger_offset = 0xffff;
     chunk_buffers_.written();
   } else {
     dma_overflow_++;
@@ -431,6 +474,11 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
 /*static*/ volatile void* ADC::DEBUG_DADDR()
 {
   return dma_channel_adc.TCD->DADDR;
+}
+
+uint32_t ADC::ext_value()
+{
+  return dma_buffer_ext[0];
 }
 
 /*static*/ void ADC::CalibratePitch(int32_t c2, int32_t c4)

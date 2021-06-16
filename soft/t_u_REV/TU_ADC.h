@@ -62,6 +62,12 @@ namespace TU {
 // This mode was implemented for the 'scope app, and just runs a continuous double/quad buffered DMA
 // acquisition, with the app grabbing chunks. The expectation is that reading will be more frequent
 // than the buffers get filled. This mode also provides a way to change the timing.
+//
+// NOTE: Buffered mode also has a "special" feature to be able to sync samples with the TR inputs
+// that requires cooperation with DigitalInputs.
+//
+// \sa comments in ADC::InitDMASettingsBuffered
+//
 class ADC {
 public:
   // DMA buffers (mainly for buffered mode, but shared with normal mode)
@@ -71,10 +77,11 @@ public:
 
   // Buffered mode buffers
   struct ChunkInfo {
-    size_t ext_trigger_offset = 0;
+    uint16_t ext_trigger_offset = 0xffff;
   };
   static constexpr size_t kChunkBufferCount = 4;
   using ChunkBuffers = util::FrameBuffer<kDMAChunkSize, kChunkBufferCount, int16_t, ChunkInfo>;
+  using Chunk = ChunkBuffers::Frame;
 
   enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_BUFFERED };
 
@@ -104,7 +111,7 @@ public:
   // BUFFERED_MODE
   static ChunkBuffers &chunk_buffers() { return chunk_buffers_; }
 
-  static void BufferedModeISR(const uint16_t *read_buffer);
+  static void BufferedModeISR(const uint16_t *read_buffer, uint16_t ext_trigger_address);
 
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
@@ -152,6 +159,8 @@ public:
   // DEBUG
   static volatile void *DEBUG_DADDR();
   static uint32_t DEBUG_dma_overflow() { return dma_overflow_; }
+
+  static uint32_t ext_value();
 
 private:
   template <ADC_CHANNEL channel>

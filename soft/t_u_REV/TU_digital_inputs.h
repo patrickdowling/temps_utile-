@@ -2,16 +2,15 @@
 #define TU_DIGITAL_INPUTS_H_
 
 #include <stdint.h>
+#include <string.h>
+
 #include "TU_config.h"
 #include "TU_core.h"
+#include "TU_gpio.h"
 
 namespace TU {
 
-enum DigitalInput {
-  DIGITAL_INPUT_1,
-  DIGITAL_INPUT_2,
-  DIGITAL_INPUT_LAST
-};
+enum DigitalInput { DIGITAL_INPUT_1, DIGITAL_INPUT_2, DIGITAL_INPUT_LAST };
 
 #define DIGITAL_INPUT_MASK(x) (0x1 << (x))
 
@@ -20,65 +19,64 @@ static constexpr uint32_t DIGITAL_INPUT_2_MASK = DIGITAL_INPUT_MASK(DIGITAL_INPU
 
 class DigitalInputs {
 public:
-
   static void Init();
 
   static void Scan();
-  
+
   static void Clear();
 
+  // Special thing for scope app (although, using the DMA thing might be better than ISR in
+  // general...) Only one of these modes can be active at the same time
+  static void EnableInterrupts();
+  static void EnableDMARequest(DigitalInput digital_input);
+
   // @return mask of all pins clocked since last call, reset state
-  static inline uint32_t clocked() {
-    return clocked_mask_;
-  }
+  static inline uint32_t clocked() { return clocked_mask_; }
 
   // @return mask if pin clocked since last call and reset state
-  template <DigitalInput input> static inline uint32_t clocked() {
+  template <DigitalInput input>
+  static inline uint32_t clocked()
+  {
     return clocked_mask_ & (0x1 << input);
   }
 
   // @return mask if pin clocked since last call, reset state
-  static inline uint32_t clocked(DigitalInput input) {
-    return clocked_mask_ & (0x1 << input);
+  static inline uint32_t clocked(DigitalInput input) { return clocked_mask_ & (0x1 << input); }
+
+  template <DigitalInput input>
+  static inline bool read_immediate()
+  {
+    return !digitalReadFast(DIGITAL_INPUT_1 == input ? TR1 : TR2);
   }
 
-  template <DigitalInput input> static inline bool read_immediate() {
-    return !digitalReadFast(input);
+  static inline bool read_immediate(DigitalInput input)
+  {
+    return !digitalReadFast(DIGITAL_INPUT_1 == input ? TR1 : TR2);
   }
 
-  static inline bool read_immediate(DigitalInput input) {
-    return !digitalReadFast(input);
-  }
-
-  template <DigitalInput input> static inline void clock() {
+  template <DigitalInput input>
+  static inline void clock()
+  {
     clocked_[input] = 1;
   }
 
-  static inline uint8_t global_div_TR1() {
-    return global_divisor_TR1_;
-  }
-  
-  static inline void set_global_div_TR1(uint8_t divisor) {
-    global_divisor_TR1_ = divisor;
-  }
+  static inline uint8_t global_div_TR1() { return global_divisor_TR1_; }
 
-  static inline bool master_clock() {
-    return master_clock_TR1_;
-  }
+  static inline void set_global_div_TR1(uint8_t divisor) { global_divisor_TR1_ = divisor; }
 
-  static inline void set_master_clock(bool v) {
-    master_clock_TR1_ = v;
-  }
+  static inline bool master_clock() { return master_clock_TR1_; }
+
+  static inline void set_master_clock(bool v) { master_clock_TR1_ = v; }
 
 private:
-
   static uint32_t clocked_mask_;
   static volatile uint32_t clocked_[DIGITAL_INPUT_LAST];
   static uint8_t global_divisor_TR1_;
   static bool master_clock_TR1_;
 
   template <DigitalInput input>
-  static uint32_t ScanInput() {
+  static uint32_t ScanInput()
+  {
     if (clocked_[input]) {
       clocked_[input] = 0;
       return DIGITAL_INPUT_MASK(input);
@@ -95,11 +93,10 @@ public:
   static constexpr uint32_t kDisplayTime = TU_CORE_ISR_FREQ / 8;
   static constexpr uint32_t kPhaseInc = (0xf << 28) / kDisplayTime;
 
-  void Init() {
-    phase_ = 0;
-  }
+  void Init() { phase_ = 0; }
 
-  void Update(uint32_t ticks, bool clocked) {
+  void Update(uint32_t ticks, bool clocked)
+  {
     uint32_t phase_inc = ticks * kPhaseInc;
     if (clocked) {
       phase_ = 0xffffffff;
@@ -114,14 +111,12 @@ public:
     }
   }
 
-  uint8_t getState() const {
-    return phase_ >> 28;
-  }
+  uint8_t getState() const { return phase_ >> 28; }
 
 private:
   uint32_t phase_;
 };
 
-};
+};  // namespace TU
 
-#endif // TU_DIGITAL_INPUTS_H_
+#endif  // TU_DIGITAL_INPUTS_H_
