@@ -31,6 +31,7 @@
 #include "TU_debug.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
+#include "arm_math.h"
 #include "util/util_circular_sample_buffer.h"
 #include "util/util_popup.h"
 #include "util/util_settings.h"
@@ -292,8 +293,21 @@ void ScopeApp::Process()
     // Pre-process raw samples
     auto tail = sample_buffer_.tail_buffer();
     const auto offset = TU::ADC::channel_offset(current_adc_channel());
+#if 1
+    // Unnecessary premature optimization
+    auto dst = tail;
+    auto src = adc_chunk_buffer_;
+    auto end = adc_chunk_buffer_ + kADCChunkSize;
+    uint32_t offs = __PKHBT(offset, offset, 16);
+    while (src < end) {
+      *(uint32_t *)dst = __SSUB16(offs, *(uint32_t *)src);
+      src += 2;
+      dst += 2;
+    }
+#else
     std::transform(adc_chunk_buffer_, adc_chunk_buffer_ + kADCChunkSize, tail,
                    [offset](uint16_t raw) -> int16_t { return offset - raw; });
+#endif
     sample_buffer_.advance();
 
     auto trigger = current_channel().Process(sample_buffer_);
