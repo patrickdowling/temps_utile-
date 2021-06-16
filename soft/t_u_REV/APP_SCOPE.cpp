@@ -1,5 +1,6 @@
 // Copyright 2021 Patrick Dowling
 // Author: Patrick Dowling (pld@gurkenkiste.com)
+//
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
@@ -29,6 +30,7 @@
 #include "TU_debug.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
+#include "util/util_circular_sample_buffer.h"
 #include "util/util_popup.h"
 #include "util/util_settings.h"
 
@@ -42,34 +44,10 @@ namespace menu = TU::menu;
 
 static constexpr weegfx::coord_t kDisplayBufferSize = weegfx::Graphics::kWidth;
 static constexpr size_t kADCChunkSize = TU::ADC::kDMAChunkSize;
+static debug::AveragedCycles process_cycles;
 
-template <typename T, size_t chunk_size, size_t num_chunks>
-class CircularSampleBuffer {
-public:
-  static constexpr size_t kChunkSize = chunk_size;
-  static constexpr size_t kNumChunks = num_chunks;
-  static constexpr size_t kBufferSize = kChunkSize * kNumChunks;
-
-  void advance()
-  {
-    ++head_;
-    ++tail_;
-  }
-
-  const T *head_buffer() const { return buffer_ + (head_ % kNumChunks) * kChunkSize; }
-  const T *head_buffer(size_t i) const { return buffer_ + ((head_ + 1) % kNumChunks) * kChunkSize; }
-
-  T *tail_buffer() { return buffer_ + (tail_ % kNumChunks) * kChunkSize; }
-
-private:
-  T buffer_[kBufferSize];
-  size_t head_ = 0;
-  size_t tail_ = kNumChunks - 1;
-};
-
-static constexpr uint32_t kSettingTimeoutTicks = 5000;
-static constexpr uint32_t kMenuTimeoutTicks = 30000;
-
+// Helper class to process buffers and find triggers
+//
 class TriggerProcessor {
 public:
   enum TriggerType {
@@ -119,6 +97,8 @@ static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
     {"2000", .adc_frequency = 2000 * 128},
 };
 
+// Scope channel class; maintains settings and can process buffers
+//
 enum ScopeChannelSetting {
   SCOPE_CHANNEL_SETTING_XOFF,
   SCOPE_CHANNEL_SETTING_YOFF,
@@ -133,14 +113,21 @@ enum ScopeChannelSetting {
 class ScopeChannel : public settings::SettingsBase<ScopeChannel, SCOPE_CHANNEL_SETTING_LAST> {
 public:
   void Init();
-  void Process(ADC_CHANNEL adc_channel, const uint16_t *adc_chunk);
 
-  const int16_t *UpdateDisplayBuffer();
+  template <typename T>
+  const int16_t *Process(const T &sample_buffer)
+  {
+    auto head = sample_buffer.head_buffer();
+    auto trigger = TriggerProcessor::TRIGGER_TYPE_NONE == trigger_type()
+                       ? head
+                       : TriggerProcessor::ScanBuffer<T::kChunkSize>(trigger_level(), head);
+    if (trigger) ++trigger_count_;
+    return trigger;
+  }
 
   uint32_t trigger_count() const { return trigger_count_; }
 
-  // settings wrappers
-
+  // Settings getters
   int xdiv() const { return get_value(SCOPE_CHANNEL_SETTING_XDIV); }
   int ydiv() const { return get_value(SCOPE_CHANNEL_SETTING_YDIV); }
 
@@ -156,6 +143,7 @@ public:
 
   const TimebaseParameters &current_timebase() const { return kTimebaseParameters[xdiv()]; }
 
+  // UI helpers
   void UpdateEnabledSettings();
   int num_enabled_settings() const { return num_enabled_settings_; }
   int enabled_setting_at(int index) const { return enabled_settings_[index]; }
@@ -165,11 +153,6 @@ private:
 
   int num_enabled_settings_{0};
   ScopeChannelSetting enabled_settings_[SCOPE_CHANNEL_SETTING_LAST];
-
-  FrameBuffer<kDisplayBufferSize, 2, int16_t> display_buffers_;
-  const int16_t *current_display_buffer_ = nullptr;
-
-  CircularSampleBuffer<int16_t, kADCChunkSize, 4> sample_buffer_;
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
@@ -188,48 +171,8 @@ void ScopeChannel::Init()
 {
   InitDefaults();
   UpdateEnabledSettings();
-
-  display_buffers_.Init();
 }
 
-static debug::AveragedCycles process_cycles;
-
-void ScopeChannel::Process(ADC_CHANNEL adc_channel, const uint16_t *adc_chunk)
-{
-  debug::ScopedCycleMeasurement cycles{process_cycles};
-
-  // Offset raw samples
-  auto tail = sample_buffer_.tail_buffer();
-  for (auto src = adc_chunk; src < adc_chunk + kADCChunkSize; ++src)
-    *tail++ = TU::ADC::offset_value(adc_channel, *src);
-
-  sample_buffer_.advance();
-  auto head = sample_buffer_.head_buffer();
-  auto trigger = TriggerProcessor::TRIGGER_TYPE_NONE == trigger_type()
-                     ? head
-                     : TriggerProcessor::ScanBuffer<kADCChunkSize>(trigger_level(), head);
-  if (trigger) {
-    ++trigger_count_;
-    if (display_buffers_.writeable()) {
-      auto display_buffer = display_buffers_.writeable_frame();
-
-      size_t n = trigger - head;
-      std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
-      display_buffer += kADCChunkSize - n;
-      std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
-      display_buffers_.written();
-    }
-  }
-}
-
-const int16_t *ScopeChannel::UpdateDisplayBuffer()
-{
-  if (display_buffers_.readable()) {
-    if (current_display_buffer_) display_buffers_.read();
-    current_display_buffer_ = display_buffers_.readable_frame();
-  }
-  return current_display_buffer_;
-}
 void ScopeChannel::UpdateEnabledSettings()
 {
   auto settings = enabled_settings_;
@@ -281,8 +224,15 @@ private:
     menu::ScreenCursor<menu::kScreenLines> cursor;
   } ui_;
 
+  using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
+  using DisplayBuffers = FrameBuffer<kDisplayBufferSize, 2, int16_t>;
+
   int current_channel_{0};
+  const int16_t *current_display_buffer_ = nullptr;
+
   static uint16_t adc_chunk_buffer_[kADCChunkSize];
+  static CircularSampleBuffer sample_buffer_;
+  static DisplayBuffers display_buffers_;
 
   ScopeChannel channels_[kNumChannels];
 
@@ -292,15 +242,20 @@ private:
   const ScopeChannel &current_channel() const { return channels_[current_channel_]; }
 
   void RenderMenu() const;
-  void RenderScope();  // const;
+  void RenderScope() const;
   void RenderScopeUI() const;
+
+  void UpdateDisplayBuffer();
 };
 
 /*static*/ uint16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
+/*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
+/*static*/ ScopeApp::DisplayBuffers ScopeApp::display_buffers_ __attribute__((aligned(4)));
 
 void ScopeApp::Init()
 {
   for (auto &channel : channels_) channel.Init();
+  display_buffers_.Init();
 
   ui_.cursor.Init(SCOPE_CHANNEL_SETTING_FIRST, SCOPE_CHANNEL_SETTING_LAST - 1);
   ui_.cursor.AdjustEnd(current_channel().num_enabled_settings() - 1);
@@ -308,8 +263,27 @@ void ScopeApp::Init()
 
 void ScopeApp::Process()
 {
-  if (TU::ADC::ReadChunk(adc_chunk_buffer_))
-    channels_[current_channel_].Process(current_adc_channel(), adc_chunk_buffer_);
+  if (TU::ADC::ReadChunk(adc_chunk_buffer_)) {
+    debug::ScopedCycleMeasurement cycles{process_cycles};
+
+    // Pre-process raw samples
+    auto tail = sample_buffer_.tail_buffer();
+    const auto offset = TU::ADC::channel_offset(current_adc_channel());
+    std::transform(adc_chunk_buffer_, adc_chunk_buffer_ + kADCChunkSize, tail,
+                   [offset](uint16_t raw) -> int16_t { return offset - raw; });
+    sample_buffer_.advance();
+
+    auto trigger = current_channel().Process(sample_buffer_);
+    if (trigger && display_buffers_.writeable()) {
+      auto display_buffer = display_buffers_.writeable_frame();
+
+      size_t n = trigger - sample_buffer_.head_buffer();
+      std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
+      display_buffer += kADCChunkSize - n;
+      std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
+      display_buffers_.written();
+    }
+  }
 
   // Other regular book-keeping?
 }
@@ -325,6 +299,7 @@ void ScopeApp::UpdateUI()
 size_t ScopeApp::Save(util::StreamBufferWriter &stream_buffer) const
 {
   stream_buffer.Write(current_channel_);
+  for (auto &channel : channels_) channel.Save(stream_buffer);
 
   return stream_buffer.overflow() ? 0 : stream_buffer.written();
 }
@@ -332,6 +307,7 @@ size_t ScopeApp::Save(util::StreamBufferWriter &stream_buffer) const
 size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
 {
   stream_buffer.Read(current_channel_);
+  for (auto &channel : channels_) channel.Restore(stream_buffer);
 
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
@@ -417,6 +393,7 @@ void ScopeApp::Render()  // const
   if (ui_.menu_active) {
     RenderMenu();
   } else {
+    UpdateDisplayBuffer();
     RenderGrid();
     RenderScope();
     RenderScopeUI();
@@ -425,6 +402,7 @@ void ScopeApp::Render()  // const
 
 void ScopeApp::RenderScreensaver()  // const
 {
+  UpdateDisplayBuffer();
   RenderScope();
 }
 
@@ -434,6 +412,14 @@ void ScopeApp::EventScreensaverOff()
   ui_.cursor.set_editing(false);
   ui_.xdiv_display.show();
   ui_.ydiv_display.show();
+}
+
+void ScopeApp::UpdateDisplayBuffer()
+{
+  if (display_buffers_.readable()) {
+    if (current_display_buffer_) display_buffers_.read();
+    current_display_buffer_ = display_buffers_.readable_frame();
+  }
 }
 
 void ScopeApp::RenderMenu() const
@@ -460,11 +446,11 @@ void ScopeApp::RenderMenu() const
   }
 }
 
-void ScopeApp::RenderScope()  // const
+void ScopeApp::RenderScope() const
 {
   auto &channel = current_channel();
 
-  auto display_buffer = channel.UpdateDisplayBuffer();
+  auto display_buffer = current_display_buffer_;
   if (display_buffer) {
     auto ydiv = channel.ydiv();
     auto y1 = 32 - ((ydiv * display_buffer[0]) >> 6);
@@ -543,7 +529,7 @@ void SCOPE_init()
 
 size_t SCOPE_storageSize()
 {
-  return sizeof(int);
+  return sizeof(int) + scope::ScopeApp::kNumChannels * scope::ScopeChannel::storageSize();
 }
 
 size_t SCOPE_save(util::StreamBufferWriter &stream)

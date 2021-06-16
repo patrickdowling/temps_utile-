@@ -99,6 +99,11 @@ public:
     return calibration_data_->offset[adc_channel] - value;
   }
 
+  static uint16_t channel_offset(ADC_CHANNEL adc_channel)
+  {
+    return calibration_data_->offset[adc_channel];
+  }
+
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
   static constexpr uint8_t kAdcResolution = 12;
