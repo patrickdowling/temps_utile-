@@ -120,8 +120,8 @@ struct TimebaseParameters {
 };
 
 static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
-    {"100", .adc_frequency = 100 * 128},   {"200", .adc_frequency = 200 * 128},
-    {"500", .adc_frequency = 500 * 128},   {"1000", .adc_frequency = 1000 * 128},
+    {" 100", .adc_frequency = 100 * 128},  {" 200", .adc_frequency = 200 * 128},
+    {" 500", .adc_frequency = 500 * 128},  {"1000", .adc_frequency = 1000 * 128},
     {"2000", .adc_frequency = 2000 * 128},
 };
 
@@ -274,15 +274,16 @@ private:
   struct {
     bool menu_active = false;
 
-    bool edit_trigger_level = false;
+    ScopeChannelSetting edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
 
-    util::PopupElement xdiv_display;
-    util::PopupElement ydiv_display;
+    volatile uint32_t trigger_lost = 0;
+
+    util::PopupElement edit_setting;
+    util::PopupElement status_bar;
     util::PopupElement info_overlay;
 
     menu::ScreenCursor<menu::kScreenLines> cursor;
 
-    volatile uint32_t trigger_lost = 0;
   } ui_;
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
@@ -374,8 +375,8 @@ void ScopeApp::Process()
 void ScopeApp::UpdateUI()
 {
   auto ticks = TU::ui.ticks();
-  ui_.xdiv_display.Tick(ticks);
-  ui_.ydiv_display.Tick(ticks);
+  ui_.edit_setting.Tick(ticks);
+  ui_.status_bar.Tick(ticks);
   ui_.info_overlay.Tick(ticks);
 }
 
@@ -421,11 +422,19 @@ void ScopeApp::OnButton(const UI::Event &event)
         if (!ui_.menu_active) { ui_.info_overlay.show(); }
       } break;
       case TU::CONTROL_BUTTON_R: {
-        if (!ui_.menu_active) {
-          ui_.edit_trigger_level = !ui_.edit_trigger_level;
-          ui_.ydiv_display.show();
-        } else {
+        if (ui_.menu_active) {
           ui_.cursor.toggle_editing();
+        } else {
+          if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
+              TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
+            ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
+            ui_.edit_setting.show();
+            ui_.status_bar.hide();
+          } else {
+            ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_YDIV;
+            ui_.status_bar.show();
+            ui_.edit_setting.hide();
+          }
         }
       } break;
       default: break;
@@ -458,14 +467,19 @@ void ScopeApp::OnEncoder(const UI::Event &event)
     if (TU::CONTROL_ENCODER_L == event.control) {
       if (current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value))
         TU::ADC::StartConversionBuffered(current_channel.timebase().adc_frequency, ADC_CHANNEL_1);
-      ui_.xdiv_display.show();
+      ui_.edit_setting.hide();
+      ui_.status_bar.show();
     } else if (TU::CONTROL_ENCODER_R == event.control) {
-      if (ui_.edit_trigger_level) {
-        current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
-      } else {
-        current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+      switch (ui_.edit_setting_r) {
+        case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
+          current_channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event.value * 32);
+          ui_.edit_setting.show();
+          ui_.status_bar.hide();
+          break;
+        case SCOPE_CHANNEL_SETTING_YDIV:
+          current_channel.change_value(SCOPE_CHANNEL_SETTING_YDIV, event.value);
+        default: ui_.status_bar.show(); break;
       }
-      ui_.ydiv_display.show();
     }
   }
 }
@@ -494,8 +508,7 @@ void ScopeApp::EventScreensaverOff()
 {
   ui_.menu_active = false;
   ui_.cursor.set_editing(false);
-  ui_.xdiv_display.show();
-  ui_.ydiv_display.show();
+  ui_.status_bar.show();
 }
 
 void ScopeApp::UpdateDisplayBuffer()
@@ -580,6 +593,23 @@ static constexpr const uint8_t *trigger_type_icons[TriggerProcessor::TRIGGER_TYP
     nullptr, trigger_rising_edge_8x8, trigger_falling_edge_8x8, trigger_ext1_8x8, trigger_ext2_8x8,
 };
 
+const uint8_t edit_indicators_8[3 * 3] = {
+    0x66, 0xe7, 0x66,  // both
+    0x06, 0x07, 0x06,  // min
+    0x60, 0xe0, 0x60,  // max
+};
+
+inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
+                         const settings::value_attr &attr)
+{
+  const uint8_t *src = edit_indicators_8;
+  if (value == attr.max_)
+    src += 3 * 2;
+  else if (value == attr.min_)
+    src += 3;
+  graphics.drawBitmap8(x - 3, y, 3, src);
+}
+
 };  // namespace icons
 
 void ScopeApp::RenderScopeUI() const
@@ -587,29 +617,10 @@ void ScopeApp::RenderScopeUI() const
   namespace DEBUG = TU::DEBUG;
   auto &channel = current_channel();
 
-  graphics.drawBitmap8(0, 0, 8, icons::channels[current_channel_]);
-  graphics.drawHLine(0, 8, 8);
-
-  static constexpr weegfx::coord_t bottom_text_y = 63 - 8;
-
-  if (ui_.xdiv_display.visible()) {
-    graphics.setPrintPos(64, bottom_text_y);
-    graphics.print(channel.timebase().label);
-  }
-
-  auto y = 32 - (channel.trigger_level() >> 6) - 3;
-  CONSTRAIN(y, 0, 58);
-  graphics.drawBitmap8(0, y, 3, icons::trigger_level_3x8);
-
-  if (ui_.ydiv_display.visible()) {
-    if (ui_.edit_trigger_level) {
-      CONSTRAIN(y, 0, bottom_text_y);
-      graphics.setPrintPos(5, y);
-      graphics.pretty_print(channel.trigger_level(), 5);
-    } else {
-      graphics.setPrintPos(128 - 4 * weegfx::Graphics::kFixedFontW, bottom_text_y);
-      graphics.printf(channel.scaling().label);
-    }
+  // Top [channel] .... [trigger]
+  if (!ui_.status_bar.visible()) {
+    graphics.drawBitmap8(3, 0, 8, icons::channels[current_channel_]);
+    graphics.drawHLine(3, 8, 8);
   }
 
   const uint8_t *icon = icons::trigger_type_icons[channel.trigger_type()];
@@ -623,6 +634,50 @@ void ScopeApp::RenderScopeUI() const
     graphics.print('?');
   }
 
+  // Left: Trigger level
+  auto trigger_level_y = to_pixel(channel.trigger_level(), channel.scaling().multiplier) - 3;
+  if (TriggerProcessor::TRIGGER_TYPE_NONE != channel.trigger_type()) {
+    CONSTRAIN(trigger_level_y, 0, 58);
+    graphics.drawBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
+  }
+
+  // On-screen edit overlay?
+  if (ui_.edit_setting.visible()) {
+    CONSTRAIN(trigger_level_y, 0, 56);
+    graphics.setPrintPos(6, trigger_level_y);
+    graphics.pretty_print(channel.trigger_level(), 5);
+  } else
+      // Bottom [channel][][timebase][scale]
+      if (ui_.status_bar.visible()) {
+    weegfx::coord_t bottom_text_y = 64 - weegfx::Graphics::kFixedFontH;
+
+    graphics.clearRect(0, bottom_text_y, 128, 8);
+    graphics.drawHLine(0, bottom_text_y - 1, 128);
+    graphics.drawAlignedByte(32, bottom_text_y, 0xaa);
+    graphics.drawAlignedByte(64, bottom_text_y, 0xaa);
+    graphics.drawAlignedByte(96, bottom_text_y, 0xaa);
+
+    bottom_text_y++;
+    graphics.setPrintPos(0, bottom_text_y);
+    graphics.print("1    ");
+    graphics.invertRect(0, bottom_text_y, weegfx::Graphics::kFixedFontW,
+                        weegfx::Graphics::kFixedFontH + 1);
+
+    x = 32 + 6;
+    icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.xdiv(),
+                        channel.value_attr(SCOPE_CHANNEL_SETTING_XDIV));
+    graphics.setPrintPos(x, bottom_text_y);
+    graphics.print(channel.timebase().label);
+
+    x = 96 + 6;
+    if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r)
+      icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.ydiv(),
+                          channel.value_attr(SCOPE_CHANNEL_SETTING_YDIV));
+    graphics.setPrintPos(x, bottom_text_y);
+    graphics.printf(channel.scaling().label);
+  }
+
+  // Info/debug overlay
   if (ui_.info_overlay.visible()) {
     graphics.setPrintPos(32, 0);
     graphics.print(channel.trigger_count() & 0xffff, 5);
