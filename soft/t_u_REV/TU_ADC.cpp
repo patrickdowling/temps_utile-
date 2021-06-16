@@ -408,8 +408,12 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
 
 /*static*/ void FASTRUN ADC::BufferedModeISR(const uint16_t* read_buffer)
 {
+  // Another option would be to use yet-another-DMA channel to copy the data (async?) and do the
+  // offset processing "later", i.e. when the buffer gets used.
+
   if (chunk_buffers_.writeable()) {
-    ReadChunk(chunk_buffers_.writeable_frame(), read_buffer);
+    auto chunk = chunk_buffers_.writeable_frame();
+    ReadChunk(chunk->buffer, read_buffer);
     chunk_buffers_.written();
   } else {
     dma_overflow_++;

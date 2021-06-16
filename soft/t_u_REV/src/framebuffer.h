@@ -1,12 +1,17 @@
 #ifndef DRIVERS_FRAMEBUFFER_H_
 #define DRIVERS_FRAMEBUFFER_H_
 
+#include <array>
+
 #include "../util/util_macros.h"
 
 namespace util {
 
 // - This could be specialized for frames == 2 (i.e. double-buffer)
 // - Takes some short-cuts so assumes correct order of calls
+// - Takes an optional 'meta' type that can be used to add data for the frame
+// - Yeah, the naming is increasingly awkward
+// TODO(ish) Make the Frame type "smart" and auto-release the buffers
 
 // Initial version used a different ring-buffer implementation that used
 // frames - 1 elements to be able to distinguish between empty/full, but
@@ -16,18 +21,37 @@ namespace util {
 // transferred.
 // See https://gist.github.com/patrickdowling/0029f58fb20e63d7db9d
 
-template <size_t frame_size, size_t num_frames, typename T = uint8_t>
+template <typename T>
+struct FrameImpl {
+  T *buffer = nullptr;
+};
+
+template <typename T, typename InfoType>
+struct FrameType : public FrameImpl<T> {
+  InfoType info = {};
+};
+
+template <typename T>
+struct FrameType<T, void> : public FrameImpl<T> {};
+
+template <size_t frame_size, size_t num_frames, typename T = uint8_t, typename InfoType = void>
 class FrameBuffer {
 public:
   static const size_t kFrameSize = frame_size;
+
+  using Frame = FrameType<T, InfoType>;
 
   FrameBuffer() {}
 
   void Init()
   {
     memset(frame_memory_, 0, sizeof(frame_memory_));
-    for (size_t f = 0; f < num_frames; ++f) frame_buffers_[f] = frame_memory_ + kFrameSize * f;
-    write_ptr_ = read_ptr_ = 0;
+
+    auto buffer = frame_memory_;
+    for (auto &f : frames_) {
+      f.buffer = buffer;
+      buffer += kFrameSize;
+    }
   }
 
   size_t writeable() const { return num_frames - readable(); }
@@ -35,10 +59,10 @@ public:
   size_t readable() const { return write_ptr_ - read_ptr_; }
 
   // @return readable frame (assumes one exists)
-  const T *readable_frame() const { return frame_buffers_[read_ptr_ % num_frames]; }
+  const Frame *readable_frame() const { return &frames_[read_ptr_ % num_frames]; }
 
   // @return next writeable frame (assumes one exists)
-  T *writeable_frame() { return frame_buffers_[write_ptr_ % num_frames]; }
+  Frame *writeable_frame() { return &frames_[write_ptr_ % num_frames]; }
 
   void read() { ++read_ptr_; }
 
@@ -46,10 +70,11 @@ public:
 
 private:
   T frame_memory_[kFrameSize * num_frames] __attribute__((aligned(4)));
-  T *frame_buffers_[num_frames];
 
-  volatile size_t write_ptr_;
-  volatile size_t read_ptr_;
+  std::array<Frame, num_frames> frames_;
+
+  volatile size_t write_ptr_ = 0;
+  volatile size_t read_ptr_ = 0;
 
   DISALLOW_COPY_AND_ASSIGN(FrameBuffer);
 };

@@ -23,9 +23,9 @@
 #ifndef DRIVERS_DISPLAY_H_
 #define DRIVERS_DISPLAY_H_
 
+#include "SH1106_128x64_driver.h"
 #include "framebuffer.h"
 #include "page_display_driver.h"
-#include "SH1106_128x64_driver.h"
 #include "weegfx.h"
 
 namespace display {
@@ -37,42 +37,43 @@ void Init();
 void AdjustOffset(uint8_t offset);
 
 static inline void Flush() __attribute__((always_inline));
-static inline void Flush() {
-	if (driver.Flush())
-		frame_buffer.read();
+static inline void Flush()
+{
+  if (driver.Flush()) frame_buffer.read();
 }
 
 static inline void Update() __attribute__((always_inline));
-static inline void Update() {
+static inline void Update()
+{
   if (driver.frame_valid()) {
     driver.Update();
   } else {
-    if (frame_buffer.readable())
-      driver.Begin(frame_buffer.readable_frame());
+    if (frame_buffer.readable()) driver.Begin(frame_buffer.readable_frame()->buffer);
   }
 }
 
-};
+};  // namespace display
 
 extern weegfx::Graphics graphics;
 
-#define GRAPHICS_BEGIN_FRAME(wait) \
-do { \
-  DEBUG_PIN_SCOPE(TU_GPIO_DEBUG_PIN1); \
-  uint8_t *frame = NULL; \
-  do { \
-    if (display::frame_buffer.writeable()) \
-      frame = display::frame_buffer.writeable_frame(); \
-  } while (!frame && wait); \
-  if (frame) { \
-    graphics.Begin(frame, true); \
-    do {} while(0)
+#define GRAPHICS_BEGIN_FRAME(wait)                               \
+  do {                                                           \
+    DEBUG_PIN_SCOPE(TU_GPIO_DEBUG_PIN1);                         \
+    uint8_t *frame = NULL;                                       \
+    do {                                                         \
+      if (display::frame_buffer.writeable())                     \
+        frame = display::frame_buffer.writeable_frame()->buffer; \
+    } while (!frame && wait);                                    \
+    if (frame) {                                                 \
+      graphics.Begin(frame, true);                               \
+      do {                                                       \
+    } while (0)
 
-#define GRAPHICS_END_FRAME() \
-    graphics.End(); \
-    display::frame_buffer.written(); \
-  } \
-} while (0)
+#define GRAPHICS_END_FRAME()       \
+  graphics.End();                  \
+  display::frame_buffer.written(); \
+  }                                \
+  }                                \
+  while (0)
 
-
-#endif // DRIVERS_DISPLAY_H_
+#endif  // DRIVERS_DISPLAY_H_
