@@ -134,7 +134,7 @@ void AppMenu::DrawAppsPage() const
     }
 
     item.SetPrintPos();
-    graphics.movePrintPos(weegfx::Graphics::kFixedFontW, 0);
+    graphics.movePrintPos(weegfx::kFixedFontW, 0);
     graphics.print(app_desc->name);
     if (app_switcher.current_app_id() == app_desc->id)
       graphics.drawBitmap8(item.x + 2, item.y + 1, 4, bitmap_indicator_4x8);
@@ -172,7 +172,7 @@ void AppMenu::DrawSlotsPage(PAGE page) const
     if (SLOT_STATE::CORRUPT == slot_info.state)
       graphics.print('!');
     else
-      graphics.movePrintPos(weegfx::Graphics::kFixedFontW, 0);
+      graphics.movePrintPos(weegfx::kFixedFontW, 0);
 
     if (!debug_display_) {
       if (SLOT_STATE::EMPTY != slot_info.state)

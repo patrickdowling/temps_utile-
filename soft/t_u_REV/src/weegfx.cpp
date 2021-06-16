@@ -19,29 +19,20 @@
 // SOFTWARE.
 
 #include "weegfx.h"
-#include <string.h>
+
 #include <Arduino.h>
 #include <stdarg.h>
+#include <string.h>
+
 #include "../util/util_macros.h"
 
 namespace weegfx {
-enum DRAW_MODE {
-  DRAW_NORMAL,
-  DRAW_INVERSE,
-  DRAW_OVERWRITE, // unused, but possible fastest
-  DRAW_CLEAR
-};
-};
+
 using weegfx::Graphics;
-
-
-const uint8_t test_bitmap[8] = {
-  0xf0, 0xf0, 0xf0, 0xf0, 0x0f, 0x0f, 0x0f, 0x0f
-};
 
 // TODO
 // - Bench templated draw_pixel_row (inlined versions) vs. function pointers
-// - Offer specialized functions w/o clipping or specific draw mode?
+// - Offer specialized functions w/o clipping or specific draw mode (e.g. text overwrite)
 // - Remainder masks as LUT or switch
 // - 32bit ops? Should be possible along x-axis (use SIMD instructions?) but not y (page stride)
 // - Clipping for x, y < 0
@@ -50,17 +41,33 @@ const uint8_t test_bitmap[8] = {
 // - print(string) -> print(char) can re-use variables
 // - etc.
 
-#define CLIPX(x, w) \
+#define CLIPX(x, w)                   \
   if (x + w > kWidth) w = kWidth - x; \
-  if (x < 0) { w += x; x = 0; } \
-  if (w <= 0) return; \
-  do {} while (0)
+  if (x < 0) {                        \
+    w += x;                           \
+    x = 0;                            \
+  }                                   \
+  if (w <= 0) return;                 \
+  do {                                \
+  } while (0)
 
-#define CLIPY(y, h) \
+#define CLIPY(y, h)                     \
   if (y + h > kHeight) h = kHeight - y; \
-  if (y < 0) { h += y; y = 0; } \
-  if (h <= 0) return; \
-  do {} while (0)
+  if (y < 0) {                          \
+    h += y;                             \
+    y = 0;                              \
+  }                                     \
+  if (h <= 0) return;                   \
+  do {                                  \
+  } while (0)
+
+// clang-format off
+template <DRAW_MODE draw_mode>
+inline uint8_t pixel_op(uint8_t a, uint8_t n) __attribute__((always_inline));
+template <> inline uint8_t pixel_op<DRAW_NORMAL>(uint8_t a, uint8_t b) { return a | b; };
+template <> inline uint8_t pixel_op<DRAW_INVERSE>(uint8_t a, uint8_t b) { return a ^ b; };
+template <> inline uint8_t pixel_op<DRAW_OVERWRITE>(uint8_t, uint8_t b) { return b; };
+template <> inline uint8_t pixel_op<DRAW_CLEAR>(uint8_t a, uint8_t b) { return a & ~b; };
 
 template <weegfx::DRAW_MODE draw_mode>
 inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask) __attribute__((always_inline));
@@ -69,57 +76,76 @@ template <weegfx::DRAW_MODE draw_mode>
 inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src) __attribute__((always_inline));
 
 template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask) {
+inline void draw_pixel_row_lshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
+
+template <weegfx::DRAW_MODE draw_mode>
+inline void draw_pixel_row_rshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src, int shift) __attribute__((always_inline));
+
+template <weegfx::DRAW_MODE draw_mode>
+inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h) __attribute__((always_inline));
+// clang-format on
+
+template <weegfx::DRAW_MODE draw_mode>
+inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, uint8_t mask)
+{
   while (count--) {
-    switch (draw_mode) {
-      case weegfx::DRAW_NORMAL: *dst++ |= mask; break;
-      case weegfx::DRAW_INVERSE: *dst++ ^= mask; break;
-      case weegfx::DRAW_OVERWRITE: *dst++ = mask; break;
-      case weegfx::DRAW_CLEAR: *dst++ &= ~mask; break;
-    }
+    *dst = pixel_op<draw_mode>(*dst, mask);
+    ++dst;
   }
 }
 
 template <weegfx::DRAW_MODE draw_mode>
-inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src) {
+inline void draw_pixel_row(uint8_t *dst, weegfx::coord_t count, const uint8_t *src)
+{
   while (count--) {
-    switch(draw_mode) {
-      case weegfx::DRAW_NORMAL: *dst++ |= *src++; break;
-      case weegfx::DRAW_INVERSE: *dst++ ^= *src++; break;
-      case weegfx::DRAW_OVERWRITE: *dst++ = *src++; break;
-    }
+    *dst = pixel_op<draw_mode>(*dst, *src);
+    ++dst;
+    ++src;
   }
 }
 
-// It's tempting to check if the pixel is != 0, but first measurement shows it
-// actually makes things worse...
-#define SETPIXELS_H(start, count, value) \
-do { \
-  uint8_t *ptr = start; \
-  size_t n = count; \
-  while (n--) { \
-    *ptr++ |= value; \
-  }; \
-} while (0)
+template <weegfx::DRAW_MODE draw_mode>
+inline void draw_pixel_row_lshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src,
+                                  int shift)
+{
+  while (count--) {
+    *dst = pixel_op<draw_mode>(*dst, *src << shift);
+    ++dst;
+    ++src;
+  }
+}
 
 template <weegfx::DRAW_MODE draw_mode>
-inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h) __attribute__((always_inline)); 
+inline void draw_pixel_row_rshift(uint8_t *dst, weegfx::coord_t count, const uint8_t *src,
+                                  int shift)
+{
+  while (count--) {
+    *dst = pixel_op<draw_mode>(*dst, *src >> shift);
+    ++dst;
+    ++src;
+  }
+}
 
-void Graphics::Init() {
+template <weegfx::DRAW_MODE draw_mode>
+inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx::coord_t h)
+    __attribute__((always_inline));
+
+void Graphics::Init()
+{
   frame_ = NULL;
   setPrintPos(0, 0);
 }
 
-void Graphics::Begin(uint8_t *frame, bool clear_frame) {
-
+void Graphics::Begin(uint8_t *frame, bool clear_frame)
+{
   frame_ = frame;
-  if (clear_frame)
-    memset(frame_, 0, kFrameSize);
+  if (clear_frame) memset(frame_, 0, kFrameSize);
 
   setPrintPos(0, 0);
 }
 
-void Graphics::End() {
+void Graphics::End()
+{
   frame_ = NULL;
 }
 
@@ -148,31 +174,32 @@ inline void draw_rect(uint8_t *buf, weegfx::coord_t y, weegfx::coord_t w, weegfx
     buf += Graphics::kWidth;
   }
 
-  if (remainder) {
-    draw_pixel_row<draw_mode>(buf, w, ~(0xff << remainder));
-  }
+  if (remainder) { draw_pixel_row<draw_mode>(buf, w, ~(0xff << remainder)); }
 }
 
-void Graphics::drawRect(coord_t x, coord_t y, coord_t w, coord_t h) {
+void Graphics::drawRect(coord_t x, coord_t y, coord_t w, coord_t h)
+{
   CLIPX(x, w);
   CLIPY(y, h);
   draw_rect<DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h);
 }
 
-void Graphics::clearRect(coord_t x, coord_t y, coord_t w, coord_t h) {
+void Graphics::clearRect(coord_t x, coord_t y, coord_t w, coord_t h)
+{
   CLIPX(x, w);
   CLIPY(y, h);
   draw_rect<DRAW_CLEAR>(get_frame_ptr(x, y), y, w, h);
 }
 
-void Graphics::invertRect(coord_t x, coord_t y, coord_t w, coord_t h) {
+void Graphics::invertRect(coord_t x, coord_t y, coord_t w, coord_t h)
+{
   CLIPX(x, w);
   CLIPY(y, h);
   draw_rect<DRAW_INVERSE>(get_frame_ptr(x, y), y, w, h);
 }
 
-void Graphics::drawFrame(coord_t x, coord_t y, coord_t w, coord_t h) {
-
+void Graphics::drawFrame(coord_t x, coord_t y, coord_t w, coord_t h)
+{
   // Obvious candidate for optimizing
   // TODO Check w/h
   drawHLine(x, y, w);
@@ -181,8 +208,8 @@ void Graphics::drawFrame(coord_t x, coord_t y, coord_t w, coord_t h) {
   drawHLine(x, y + h - 1, w);
 }
 
-void Graphics::drawHLine(coord_t x, coord_t y, coord_t w) {
-
+void Graphics::drawHLine(coord_t x, coord_t y, coord_t w)
+{
   coord_t h = 1;
   CLIPX(x, w);
   CLIPY(y, h);
@@ -191,8 +218,8 @@ void Graphics::drawHLine(coord_t x, coord_t y, coord_t w) {
   draw_pixel_row<DRAW_NORMAL>(start, w, 0x1 << (y & 0x7));
 }
 
-void Graphics::drawVLine(coord_t x, coord_t y, coord_t h) {
-
+void Graphics::drawVLine(coord_t x, coord_t y, coord_t h)
+{
   coord_t w = 1;
   CLIPX(x, w);
   CLIPY(y, h);
@@ -223,13 +250,11 @@ void Graphics::drawVLine(coord_t x, coord_t y, coord_t h) {
   }
 
   // unaligned remainder
-  if (remainder) {
-    *buf |= ~(0xff << remainder);
-  }
+  if (remainder) { *buf |= ~(0xff << remainder); }
 }
 
-void Graphics::drawVLinePattern(coord_t x, coord_t y, coord_t h, uint8_t pattern) {
-
+void Graphics::drawVLinePattern(coord_t x, coord_t y, coord_t h, uint8_t pattern)
+{
   CLIPY(y, h);
   uint8_t *buf = get_frame_ptr(x, y);
 
@@ -253,14 +278,12 @@ void Graphics::drawVLinePattern(coord_t x, coord_t y, coord_t h, uint8_t pattern
   remainder = h & 0x7;
   h >>= 3;
   while (h--) {
-    *buf = pattern; // FIXME this is probably not aligned right
+    *buf = pattern;  // FIXME this is probably not aligned right
     buf += kWidth;
   }
 
   // unaligned remainder
-  if (remainder) {
-    *buf |= ~(pattern << remainder);
-  }
+  if (remainder) { *buf |= ~(pattern << remainder); }
 }
 
 void Graphics::drawHLinePattern(coord_t x, coord_t y, coord_t w, uint8_t skip)
@@ -278,39 +301,62 @@ void Graphics::drawHLinePattern(coord_t x, coord_t y, coord_t w, uint8_t skip)
   }
 }
 
-void Graphics::drawBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data) {
+template <DRAW_MODE draw_mode>
+void Graphics::blit(uint8_t *dst, coord_t y, coord_t w, coord_t h, const uint8_t *src)
+{
+  coord_t remainder = y & 0x7;
+  if (!remainder) {
+    draw_pixel_row<draw_mode>(dst, w, src);
+  } else {
+    draw_pixel_row_lshift<draw_mode>(dst, w, src, remainder);
+    if (h >= 8) {
+      dst += kWidth;
+      draw_pixel_row_rshift<draw_mode>(dst, w, src, 8 - remainder);
+    }
+  }
+}
 
+void Graphics::drawBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data)
+{
   if (x + w > kWidth) w = kWidth - x;
   if (x < 0) {
     data += x;
     w += x;
   }
-  if (w <= 0)
-    return;
+  if (w <= 0) return;
 
   coord_t h = 8;
   CLIPY(y, h);
 
-  uint8_t *buf = get_frame_ptr(x, y);
-
-  coord_t remainder = y & 0x7;
-  if (!remainder) {
-    SETPIXELS_H(buf, w, *data++);
-  } else {
-    const uint8_t *src = data;
-    SETPIXELS_H(buf, w, (*src++) << remainder);
-    if (h >= 8) {
-      buf += kWidth;
-      src = data;
-      SETPIXELS_H(buf, w, (*src++) >> (8 - remainder));
-    }
-  }
+  blit<DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h, data);
 }
 
-void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1) {
+void Graphics::writeBitmap8(coord_t x, coord_t y, coord_t w, const uint8_t *data)
+{
+  if (x + w > kWidth) w = kWidth - x;
+  if (x < 0) {
+    data += x;
+    w += x;
+  }
+  if (w <= 0) return;
+
+  coord_t h = 8;
+  CLIPY(y, h);
+
+  blit<DRAW_OVERWRITE>(get_frame_ptr(x, y), y, w, h, data);
+}
+
+void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1)
+{
   coord_t dx, dy;
-  if (x0 > x1 ) dx = x0-x1; else dx = x1-x0;
-  if (y0 > y1 ) dy = y0-y1; else dy = y1-y0;
+  if (x0 > x1)
+    dx = x0 - x1;
+  else
+    dx = x1 - x0;
+  if (y0 > y1)
+    dy = y0 - y1;
+  else
+    dy = y1 - y0;
 
   bool steep = false;
   if (dy > dx) {
@@ -327,12 +373,12 @@ void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1) {
   coord_t ystep = (y1 > y0) ? 1 : -1;
   coord_t y = y0;
 
-  // OPTIMIZE Generate mask/buffer offset before loop and update on-the-fly instead of setPixeling
-  // OPTIMIZE Generate spans of pixels to draw
+  // OPTIMIZE Generate mask/buffer offset before loop and update on-the-fly instead of
+  // setPixeling OPTIMIZE Generate spans of pixels to draw
 
   if (steep) {
-    for(coord_t x = x0; x <= x1; x++ ) {
-      setPixel(y, x); 
+    for (coord_t x = x0; x <= x1; x++) {
+      setPixel(y, x);
       err -= dy;
       if (err < 0) {
         y += ystep;
@@ -340,8 +386,8 @@ void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1) {
       }
     }
   } else {
-    for(coord_t x = x0; x <= x1; x++ ) {
-      setPixel(x, y); 
+    for (coord_t x = x0; x <= x1; x++) {
+      setPixel(x, y);
       err -= dy;
       if (err < 0) {
         y += ystep;
@@ -351,17 +397,18 @@ void Graphics::drawLine(coord_t x0, coord_t y0, coord_t x1, coord_t y1) {
   }
 }
 
-void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r) {
+void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r)
+{
   coord_t f = 1 - r;
   coord_t ddF_x = 1;
   coord_t ddF_y = -2 * r;
   coord_t x = 0;
   coord_t y = r;
 
-  setPixel(center_x  , center_y+r);
-  setPixel(center_x  , center_y-r);
-  setPixel(center_x+r, center_y  );
-  setPixel(center_x-r, center_y  );
+  setPixel(center_x, center_y + r);
+  setPixel(center_x, center_y - r);
+  setPixel(center_x + r, center_y);
+  setPixel(center_x - r, center_y);
 
   while (x < y) {
     if (f >= 0) {
@@ -372,7 +419,7 @@ void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r) {
     x++;
     ddF_x += 2;
     f += ddF_x;
-  
+
     setPixel(center_x + x, center_y + y);
     setPixel(center_x - x, center_y + y);
     setPixel(center_x + x, center_y - y);
@@ -386,20 +433,22 @@ void Graphics::drawCircle(coord_t center_x, coord_t center_y, coord_t r) {
 
 #include "../extern/gfx_font_6x8.h"
 static inline weegfx::font_glyph get_char_glyph(char c) __attribute__((always_inline));
-static inline weegfx::font_glyph get_char_glyph(char c) {
-  return ssd1306xled_font6x8 + Graphics::kFixedFontW * (c - 32);
+static inline weegfx::font_glyph get_char_glyph(char c)
+{
+  return ssd1306xled_font6x8 + kFixedFontW * (c - 32);
 }
 
 // OPTIMIZE When printing strings, all chars will have the same y/remainder
 // This will probably only save a few cycles, if any. Also the clipping can
 // be made optional (template?)
-void Graphics::draw_char(char c, coord_t x, coord_t y) {
+template <>
+void Graphics::blit_char<weegfx::DRAW_NORMAL>(char c, coord_t x, coord_t y)
+{
   if (!c) c = '0';
-  if (c <= 32 || c > 127)
-    return;
+  if (c <= 32 || c > 127) return;
 
-  coord_t w = Graphics::kFixedFontW;
-  coord_t h = Graphics::kFixedFontH;
+  coord_t w = kFixedFontW;
+  coord_t h = kFixedFontH;
   font_glyph data = get_char_glyph(c);
   if (c + w > kWidth) w = kWidth - x;
   if (x < 0) {
@@ -409,37 +458,27 @@ void Graphics::draw_char(char c, coord_t x, coord_t y) {
   if (w <= 0) return;
   CLIPY(y, h);
 
-  uint8_t *dest = get_frame_ptr(x, y);
-  coord_t remainder = y & 0x7;
-  if (!remainder) {
-    SETPIXELS_H(dest, w, *data++);
-  } else {
-    const uint8_t *src = data;
-    SETPIXELS_H(dest, w, (*src++) << remainder);
-    if (h >= 8) {
-      dest += kWidth;
-      src = data;
-      SETPIXELS_H(dest, w, (*src++) >> (8 - remainder));
-    }
-  }
+  blit<weegfx::DRAW_NORMAL>(get_frame_ptr(x, y), y, w, h, data);
 }
 
-void Graphics::print(char c) {
-  draw_char(c, text_x_, text_y_);
+void Graphics::print(char c)
+{
+  blit_char<DRAW_NORMAL>(c, text_x_, text_y_);
   text_x_ += kFixedFontW;
 }
 
 template <typename type, bool pretty>
-char *itos(type value, char *buf, size_t buflen) {
+char *itos(type value, char *buf, size_t buflen)
+{
   char *pos = buf + buflen;
   *--pos = '\0';
   if (!value) {
     *--pos = '0';
-    if (pretty) // avoid jump when 0 -> +1 or -1
+    if (pretty)  // avoid jump when 0 -> +1 or -1
       *--pos = ' ';
   } else {
     char sign = 0;
-    if (value < 0)  {
+    if (value < 0) {
       sign = '-';
       value = -value;
     } else if (pretty) {
@@ -450,71 +489,70 @@ char *itos(type value, char *buf, size_t buflen) {
       *--pos = '0' + value % 10;
       value /= 10;
     }
-    if (sign)
-      *--pos = sign;
+    if (sign) *--pos = sign;
   }
 
   return pos;
 }
 
-void Graphics::print(int value) {
+void Graphics::print(int value)
+{
   char buf[12];
   print(itos<int, false>(value, buf, sizeof(buf)));
 }
 
-void Graphics::print(long value) {
+void Graphics::print(long value)
+{
   char buf[24];
   print(itos<long, false>(value, buf, sizeof(buf)));
 }
 
-void Graphics::pretty_print(int value) {
+void Graphics::pretty_print(int value)
+{
   char buf[12];
   print(itos<int, true>(value, buf, sizeof(buf)));
 }
 
-void Graphics::print(int value, unsigned width) {
+void Graphics::print(int value, unsigned width)
+{
   char buf[15];
   char *str = itos<int, false>(value, buf, sizeof(buf));
-  while (str > buf &&
-         (unsigned)(str - buf) >= sizeof(buf) - width)
-    *--str = ' ';
+  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
   print(str);
 }
 
-void Graphics::print(uint16_t value, unsigned width) {
+void Graphics::print(uint16_t value, unsigned width)
+{
   char buf[12];
   char *str = itos<uint16_t, false>(value, buf, sizeof(buf));
-  while (str > buf &&
-         (unsigned)(str - buf) >= sizeof(buf) - width)
-    *--str = ' ';
+  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
   print(str);
 }
 
-void Graphics::print(uint32_t value, size_t width) {
+void Graphics::print(uint32_t value, size_t width)
+{
   char buf[24];
   char *str = itos<uint32_t, false>(value, buf, sizeof(buf));
-  while (str > buf &&
-         (size_t)(str - buf) >= sizeof(buf) - width)
-    *--str = ' ';
+  while (str > buf && (size_t)(str - buf) >= sizeof(buf) - width) *--str = ' ';
   print(str);
 }
 
-void Graphics::pretty_print(int value, unsigned width) {
+void Graphics::pretty_print(int value, unsigned width)
+{
   char buf[12];
   char *str = itos<int, true>(value, buf, sizeof(buf));
 
-  while (str > buf &&
-         (unsigned)(str - buf) >= sizeof(buf) - width)
-    *--str = ' ';
+  while (str > buf && (unsigned)(str - buf) >= sizeof(buf) - width) *--str = ' ';
   print(str);
 }
 
-void Graphics::pretty_print_right(int value) {
+void Graphics::pretty_print_right(int value)
+{
   coord_t x = text_x_ - kFixedFontW;
   coord_t y = text_y_;
 
   if (!value) {
-    draw_char('0', x, y);
+    blit_char<DRAW_NORMAL>('0', x, y);
   } else {
     char sign;
     if (value < 0) {
@@ -525,63 +563,70 @@ void Graphics::pretty_print_right(int value) {
     }
 
     while (value) {
-      draw_char('0' + value % 10, x, y);
+      blit_char<DRAW_NORMAL>('0' + value % 10, x, y);
       x -= kFixedFontW;
       value /= 10;
     }
-    if (sign)
-      draw_char(sign, x, y);
+    if (sign) blit_char<DRAW_NORMAL>(sign, x, y);
   }
 }
 
-void Graphics::print(const char *s) {
+void Graphics::print(const char *s)
+{
   coord_t x = text_x_;
   coord_t y = text_y_;
 
   // TODO Track position, only clip when necessary or early-out?
   while (*s) {
-    draw_char(*s++, x, y);
+    blit_char<DRAW_NORMAL>(*s++, x, y);
     x += kFixedFontW;
   }
 
   text_x_ = x;
 }
 
-void Graphics::print(const char *s, unsigned len) {
+void Graphics::print(const char *s, unsigned len)
+{
   coord_t x = text_x_;
   coord_t y = text_y_;
   while (*s && len--) {
-    draw_char(*s++, x, y);
+    blit_char<DRAW_NORMAL>(*s++, x, y);
     x += kFixedFontW;
   }
 
   text_x_ = x;
 }
 
-void Graphics::print_right(const char *s) {
+void Graphics::print_right(const char *s)
+{
   weegfx::coord_t x = text_x_;
   weegfx::coord_t y = text_y_;
   const char *c = s;
-  while (*c) ++c; // find end
+  while (*c) ++c;  // find end
 
   while (c > s) {
     x -= kFixedFontW;
-    draw_char(*--c, x, y);
+    blit_char<DRAW_NORMAL>(*--c, x, y);
   }
 }
 
-void Graphics::printf(const char *fmt, ...) {
-  char buf[128];
+static char buf[128] = {0};
+
+void Graphics::printf(const char *fmt, ...)
+{
   va_list args;
-  va_start(args, fmt );
+  va_start(args, fmt);
   vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
   print(buf);
 }
 
-void Graphics::drawStr(coord_t x, coord_t y, const char *s) {
+void Graphics::drawStr(coord_t x, coord_t y, const char *s)
+{
   while (*s) {
-    draw_char(*s++, x, y);
+    blit_char<DRAW_NORMAL>(*s++, x, y);
     x += kFixedFontW;
   }
 }
+
+}  // namespace weegfx

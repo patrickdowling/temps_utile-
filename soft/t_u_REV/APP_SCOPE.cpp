@@ -39,6 +39,8 @@
 #include "util/util_popup.h"
 #include "util/util_settings.h"
 
+#define SCOPE_DISPLAY_DRAW_CYCLES
+
 // NOTES
 // - SIMD processing of buffers?
 // - Raw values from ADC are inverted, so we use calibration offset
@@ -824,23 +826,25 @@ void ScopeApp::RenderDisplayBuffer() const
 }
 
 namespace icons {
-static const uint8_t channel_1_8x8[] = {0xff, 0x01, 0x01, 0x09, 0x7d, 0x01, 0x01, 0xff};
-static const uint8_t channel_2_8x8[] = {0xff, 0x01, 0x01, 0x75, 0x55, 0x59, 0x01, 0xff};
-static const uint8_t channel_3_8x8[] = {0xff, 0x01, 0x01, 0x55, 0x55, 0x7d, 0x01, 0xff};
-static const uint8_t channel_4_8x8[] = {0xff, 0x01, 0x01, 0x1d, 0x11, 0x79, 0x01, 0xff};
+static const uint8_t channel_1_7x8[] = {0xff, 0x81, 0x81, 0x89, 0xbd, 0x81, 0xff};
+static const uint8_t channel_2_7x8[] = {0xff, 0x81, 0xb5, 0xb5, 0xad, 0x81, 0xff};
+static const uint8_t channel_3_7x8[] = {0xff, 0x81, 0xa5, 0xb5, 0xbd, 0x81, 0xff};
+static const uint8_t channel_4_7x8[] = {0xff, 0x81, 0x9d, 0x91, 0xbd, 0x81, 0xff};
 
 static const uint8_t trigger_rising_edge_8x8[] = {0x00, 0x80, 0x90, 0x98, 0xff, 0x19, 0x11, 0x00};
 static const uint8_t trigger_falling_edge_8x8[] = {0x00, 0x01, 0x09, 0x19, 0xff, 0x98, 0x88, 0x00};
 static const uint8_t trigger_ext1_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x08, 0x7c};
 static const uint8_t trigger_ext2_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0x74, 0x5c};
 
+static const uint8_t trigger_lost_6x8[] = {0x00, 0x02, 0x01, 0x51, 0x09, 0x06};
+
 static const uint8_t trigger_level_3x8[] = {0x3e, 0x1c, 0x08};
 
 static constexpr const uint8_t *channels[4] = {
-    channel_1_8x8,
-    channel_2_8x8,
-    channel_3_8x8,
-    channel_4_8x8,
+    channel_1_7x8,
+    channel_2_7x8,
+    channel_3_7x8,
+    channel_4_7x8,
 };
 
 static constexpr const uint8_t *trigger_type_icons[TriggerProcessor::TRIGGER_TYPE_LAST] = {
@@ -875,28 +879,34 @@ void ScopeApp::RenderScopeUI() const
   auto channel_index = selected_channel_index();
   auto &channel = selected_channel();
 
-  // Top [channel] .... [trigger]
+  // Top [channel] .... [freq][trigger]
   if (!ui_.status_bar.visible()) {
-    graphics.drawBitmap8(3, 0, 8, icons::channels[channel_index]);
-    graphics.drawHLine(3, 8, 8);
+    weegfx::coord_t y = channel.yoffset();
+    CONSTRAIN(y, 0, 8);
+    graphics.writeBitmap8(3, y, 7, icons::channels[channel_index]);
+  }
+  if (get_value(SCOPE_APP_SETTING_FREQ)) {
+    graphics.setPrintPos(128 - weegfx::kFixedFontW * 5 - 18, 0);
+    auto freq = channel.frequency();
+    if (freq)
+      graphics.print(channel.frequency(), 5);
+    else
+      graphics.print("-----");
   }
 
   const uint8_t *icon = icons::trigger_type_icons[channel.trigger_type()];
   weegfx::coord_t x = 128 - 8;
   if (icon) {
-    graphics.drawBitmap8(128 - 8, 0, 8, icon);
+    graphics.writeBitmap8(x, 0, 8, icon);
     x -= 7;
   }
-  if (ui_.trigger_lost) {
-    graphics.setPrintPos(x, 0);
-    graphics.print('?');
-  }
+  if (ui_.trigger_lost) { graphics.writeBitmap8(x, 0, 6, icons::trigger_lost_6x8); }
 
   // Left: Trigger level
   auto trigger_level_y = to_pixel(channel.trigger_level(), channel.scaling().multiplier) - 3;
   if (TriggerProcessor::TRIGGER_TYPE_NONE != channel.trigger_type()) {
     CONSTRAIN(trigger_level_y, 0, 58);
-    graphics.drawBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
+    graphics.writeBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
   }
 
   if (ui_.edit_setting.visible()) {
@@ -906,7 +916,7 @@ void ScopeApp::RenderScopeUI() const
     graphics.pretty_print(channel.trigger_level(), 5);
   } else if (ui_.status_bar.visible()) {
     // Bottom [channel][?????][timebase][scale]
-    weegfx::coord_t bottom_text_y = 64 - weegfx::Graphics::kFixedFontH;
+    weegfx::coord_t bottom_text_y = 64 - weegfx::kFixedFontH;
 
     graphics.clearRect(0, bottom_text_y, 128, 8);
     graphics.drawHLine(0, bottom_text_y - 1, 128);
@@ -922,12 +932,12 @@ void ScopeApp::RenderScopeUI() const
       for (int c = 0; c < kNumChannels; ++c) {
         graphics.setPrintPos(x, bottom_text_y);
         graphics.print((char)('1' + c));
-        x += weegfx::Graphics::kFixedFontW + 1;
+        x += weegfx::kFixedFontW + 1;
       }
-      graphics.invertRect(channel_index * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y,
-                          weegfx::Graphics::kFixedFontW + 1, weegfx::Graphics::kFixedFontH + 1);
+      graphics.invertRect(channel_index * (weegfx::kFixedFontW + 1), bottom_text_y,
+                          weegfx::kFixedFontW + 1, weegfx::kFixedFontH + 1);
     } else {
-      graphics.setPrintPos(channel_index * (weegfx::Graphics::kFixedFontW + 1), bottom_text_y);
+      graphics.setPrintPos(channel_index * (weegfx::kFixedFontW + 1), bottom_text_y);
       graphics.print((char)('1' + channel_index));
     }
 
@@ -951,12 +961,6 @@ void ScopeApp::RenderScopeUI() const
     graphics.printf(channel.scaling().label);
   }
 
-  // Freq
-  if (get_value(SCOPE_APP_SETTING_FREQ)) {
-    graphics.setPrintPos(64 - weegfx::Graphics::kFixedFontH * 6, 0);
-    graphics.printf("%6u", channel.frequency());
-  }
-
   // Info/debug overlay
   if (ui_.info_overlay.visible()) {
     weegfx::coord_t y = 8;
@@ -969,9 +973,10 @@ void ScopeApp::RenderScopeUI() const
     graphics.setPrintPos(8, y + 16);
     graphics.print(debug::cycles_to_us(process_cycles.value()), 10);
   }
-
-  graphics.setPrintPos(128 - 30 - 18, 0);
+#ifdef SCOPE_DISPLAY_DRAW_CYCLES
+  graphics.setPrintPos(128 - 30, 64 - 16);
   graphics.print(debug::cycles_to_us(DEBUG::MENU_draw_cycles.value()), 5);
+#endif
 }
 
 void ScopeApp::Activate()
