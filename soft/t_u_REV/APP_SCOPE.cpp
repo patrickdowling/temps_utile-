@@ -25,6 +25,7 @@
 #include "APP_SCOPE.h"
 
 #include <algorithm>
+#include <functional>
 
 #include "TU_ADC.h"
 #include "TU_debug.h"
@@ -58,21 +59,37 @@ public:
     TRIGGER_TYPE_LAST
   };
 
-  template <size_t length>
-  static const int16_t *ScanBuffer(int16_t trigger_level, const int16_t *buffer)
+  template <size_t buffer_length>
+  static const int16_t *Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
   {
-    size_t len = length;
-    // Starting value is above trigger, find if/where it drops below
-    while (len && buffer[0] > trigger_level) {
-      ++buffer;
-      --len;
-    }
+    using Impl = const int16_t *(*)(int16_t, const int16_t *);
+    static constexpr Impl processors[TRIGGER_TYPE_LAST] = {
+        Nop<buffer_length>,
+        FindEdge<buffer_length, std::greater<int16_t>>,  // rising
+        FindEdge<buffer_length, std::less<int16_t>>,     // falling
+        Nop<buffer_length>,
+    };
+    return processors[trigger_type](threshold, buffer);
+  }
 
-    while (len--) {
-      if (buffer[0] > trigger_level) return buffer;
+private:
+  template <size_t buffer_length>
+  static const int16_t *Nop(int16_t, const int16_t *buffer)
+  {
+    return buffer;
+  }
+
+  template <size_t buffer_length, typename cmp>
+  static const int16_t *FindEdge(int16_t threshold, const int16_t *buffer)
+  {
+    auto end = buffer + buffer_length;
+    // ignore starting values that match
+    while (buffer < end && cmp{}(buffer[0], threshold)) ++buffer;
+    // find first value that matches
+    while (buffer < end) {
+      if (cmp{}(buffer[0], threshold)) return buffer;
       ++buffer;
     }
-
     return nullptr;
   }
 };
@@ -84,7 +101,15 @@ static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_
     "ext",
 };
 
-enum TimebaseDivision { TIMEBASE_1, TIMEBASE_2, TIMEBASE_3, TIMEBASE_LAST };
+enum TimebaseDivision {
+  TIMEBASE_100,
+  TIMEBASE_200,
+  TIMEBASE_500,
+  TIMEBASE_1000,
+  TIMEBASE_2000,
+  TIMEBASE_LAST
+};
+
 struct TimebaseParameters {
   const char *const label;
   uint32_t adc_frequency;
@@ -92,8 +117,8 @@ struct TimebaseParameters {
 };
 
 static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
-    {"500", .adc_frequency = 500 * 128},
-    {"1000", .adc_frequency = 1000 * 128},
+    {"100", .adc_frequency = 100 * 128},   {"200", .adc_frequency = 200 * 128},
+    {"500", .adc_frequency = 500 * 128},   {"1000", .adc_frequency = 1000 * 128},
     {"2000", .adc_frequency = 2000 * 128},
 };
 
@@ -118,9 +143,7 @@ public:
   const int16_t *Process(const T &sample_buffer)
   {
     auto head = sample_buffer.head_buffer();
-    auto trigger = TriggerProcessor::TRIGGER_TYPE_NONE == trigger_type()
-                       ? head
-                       : TriggerProcessor::ScanBuffer<T::kChunkSize>(trigger_level(), head);
+    auto trigger = TriggerProcessor::Process<T::kChunkSize>(trigger_type(), trigger_level(), head);
     if (trigger) ++trigger_count_;
     return trigger;
   }
@@ -162,7 +185,7 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     {1, 0, scope::TIMEBASE_LAST - 1, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
     {1, 1, 4, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
     {scope::TriggerProcessor::TRIGGER_TYPE_RISING, scope::TriggerProcessor::TRIGGER_TYPE_NONE,
-     scope::TriggerProcessor::TRIGGER_TYPE_RISING, "TRIG TYPE", scope::kTriggerTypeStrings,
+     scope::TriggerProcessor::TRIGGER_TYPE_FALLING, "TRIG TYPE", scope::kTriggerTypeStrings,
      settings::STORAGE_TYPE_U8},
     {32, -2048, 2047, "TRIG LVL", nullptr, settings::STORAGE_TYPE_I16},
 };
@@ -312,7 +335,7 @@ size_t ScopeApp::Restore(util::StreamBufferReader &stream_buffer)
   return stream_buffer.underflow() ? 0 : stream_buffer.read();
 }
 
-void ScopeApp::RenderGrid()
+/*static*/ void ScopeApp::RenderGrid()
 {
   graphics.drawVLinePattern(16, 0, 64, 0x88);
   graphics.drawVLinePattern(32, 0, 64, 0x88);
