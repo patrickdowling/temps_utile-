@@ -212,8 +212,11 @@ enum Timebase {
   TIMEBASE_20m,
   TIMEBASE_50m,
   TIMEBASE_100m,
+  TIMEBASE_200m,
+  TIMEBASE_500m,
   TIMEBASE_1s,
   TIMEBASE_2s,
+  TIMEBASE_5s,
   TIMEBASE_LAST,
 };
 
@@ -225,9 +228,12 @@ static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
 { .label = " 10m", .adc_frequency = 12800, .decimate = 1 },
 { .label = " 20m", .adc_frequency = 6400, .decimate = 1 },
 { .label = " 50m", .adc_frequency = 2560, .decimate = 1 },
-{ .label = "100m", .adc_frequency = 1280, .decimate = 1 },
+{ .label = "100m", .adc_frequency = 2560, .decimate = 2 },
+{ .label = "200m", .adc_frequency = 2560, .decimate = 4 },
+{ .label = "500m", .adc_frequency = 2048, .decimate = 8 },
 { .label = "  1s", .adc_frequency = 2048, .decimate = 16 },
 { .label = "  2s", .adc_frequency = 1024, .decimate = 16 },
+{ .label = "  5s", .adc_frequency = 819, .decimate = 32 },
 };
 // clang-format on
 // END generated
