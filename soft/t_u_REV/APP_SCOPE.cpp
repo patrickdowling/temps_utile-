@@ -46,6 +46,8 @@ namespace menu = TU::menu;
 
 static constexpr weegfx::coord_t kDisplayBufferSize = weegfx::Graphics::kWidth;
 static constexpr size_t kADCChunkSize = TU::ADC::kDMAChunkSize;
+static constexpr uint32_t kTriggerLostIndicatorTimeoutTicks = TU_CORE_ISR_FREQ / 3;
+
 static debug::AveragedCycles process_cycles;
 
 // Helper class to process buffers and find triggers
@@ -247,7 +249,7 @@ private:
 
     menu::ScreenCursor<menu::kScreenLines> cursor;
 
-    volatile bool trigger_found = false;
+    volatile uint32_t trigger_lost = 0;
   } ui_;
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
@@ -289,6 +291,7 @@ void ScopeApp::Init()
 
 void ScopeApp::Process()
 {
+  uint32_t trigger_lost = ui_.trigger_lost;
   if (TU::ADC::ReadChunk(adc_chunk_buffer_)) {
     debug::ScopedCycleMeasurement cycles{process_cycles};
 
@@ -313,24 +316,25 @@ void ScopeApp::Process()
     sample_buffer_.advance();
 
     auto trigger = current_channel().Process(sample_buffer_);
+    size_t trigger_offset;
     if (!trigger) {
-      trigger = sample_buffer_.head_buffer();
-      ui_.trigger_found = false;
+      trigger_lost = kTriggerLostIndicatorTimeoutTicks;
+      trigger_offset = 0;
     } else {
-      ui_.trigger_found = true;
+      // trigger_lost = 0;
+      trigger_offset = trigger - sample_buffer_.head_buffer();
     }
 
     if (display_buffers_.writeable()) {
-      auto display_buffer = display_buffers_.writeable_frame();
-      size_t n = trigger - sample_buffer_.head_buffer();
-      std::copy(trigger, trigger + kADCChunkSize - n, display_buffer);
-      display_buffer += kADCChunkSize - n;
-      std::copy(sample_buffer_.head_buffer(1), sample_buffer_.head_buffer(1) + n, display_buffer);
+      sample_buffer_.ReadHead(display_buffers_.writeable_frame(),
+                              trigger_offset - kDisplayBufferSize / 2, kDisplayBufferSize);
       display_buffers_.written();
     }
   }
 
   // Other regular book-keeping?
+  if (trigger_lost) --trigger_lost;
+  ui_.trigger_lost = trigger_lost;
 }
 
 void ScopeApp::UpdateUI()
@@ -573,7 +577,7 @@ void ScopeApp::RenderScopeUI() const
     graphics.drawBitmap8(128 - 8, 0, 8, icon);
     x -= 7;
   }
-  if (!ui_.trigger_found) {
+  if (ui_.trigger_lost) {
     graphics.setPrintPos(x, 0);
     graphics.print('?');
   }

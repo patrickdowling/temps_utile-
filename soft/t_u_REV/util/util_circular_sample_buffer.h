@@ -42,13 +42,34 @@ public:
     ++tail_;
   }
 
+  // Head is read-only
   const T *head_buffer() const { return buffer_ + (head_ % kNumChunks) * kChunkSize; }
-  const T *head_buffer(size_t i) const { return buffer_ + ((head_ + 1) % kNumChunks) * kChunkSize; }
 
+  // Extract data from head
+  void ReadHead(T *buffer, int32_t start_offset, size_t length) const
+  {
+    auto src = head_buffer() + start_offset;
+    auto end = src + length;
+
+    if (src < buffer_) {
+      buffer = std::copy(end_ - (buffer_ - src), end_, buffer);
+      src = buffer_;
+    }
+    if (end > end_) {
+      buffer = std::copy(src, end_, buffer);
+      std::copy(buffer_, buffer_ + (end - end_), buffer);
+    } else {
+      std::copy(src, end, buffer);
+    }
+  }
+
+  // Tail is writeable
   T *tail_buffer() { return buffer_ + (tail_ % kNumChunks) * kChunkSize; }
 
 private:
   T buffer_[kBufferSize];
+  const T *end_ = buffer_ + kBufferSize;
+
   size_t head_ = 0;
   size_t tail_ = kNumChunks - 1;
 };
