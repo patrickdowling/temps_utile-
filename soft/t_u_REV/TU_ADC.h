@@ -93,17 +93,12 @@ public:
   static ADC_MODE mode() { return mode_; }
 
   // BUFFERED_MODE
-  static size_t ReadChunk(uint16_t *buffer);
 
-  static int16_t offset_value(ADC_CHANNEL adc_channel, uint16_t value)
-  {
-    return calibration_data_->offset[adc_channel] - value;
-  }
+  // Read chunk of data
+  static size_t ReadChunkRaw(uint16_t *buffer);
 
-  static uint16_t channel_offset(ADC_CHANNEL adc_channel)
-  {
-    return calibration_data_->offset[adc_channel];
-  }
+  // Read chunk of data, applying internal offset
+  static size_t ReadChunk(int16_t *buffer);
 
   // NORMAL_MODE
   // These are the default settings for the original ADC use (as seen on o_C as well)
@@ -111,6 +106,13 @@ public:
   static constexpr uint32_t kAdcSmoothing = 4;
   static constexpr uint32_t kAdcSmoothBits = 8;      // fractional bits for smoothing
   static constexpr uint8_t kAdcScanResolution = 16;  // normal mode
+
+  // MISC
+
+  static uint16_t channel_offset(ADC_CHANNEL adc_channel)
+  {
+    return calibration_data_->offset[adc_channel];
+  }
 
   template <ADC_CHANNEL channel>
   static int32_t value()
@@ -160,6 +162,7 @@ private:
   static ::ADC adc_;
 
   static size_t last_chunk_;
+  static uint32_t packed_offsets_;  // for buffered mode
 
   static uint32_t raw_[ADC_CHANNEL_LAST];
   static uint32_t smoothed_[ADC_CHANNEL_LAST];

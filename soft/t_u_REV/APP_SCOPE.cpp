@@ -66,38 +66,77 @@ public:
   };
 
   template <size_t buffer_length, int stride>
-  static const int16_t *Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
+  const int16_t *Process(TriggerType trigger_type, int16_t threshold, const int16_t *buffer)
   {
-    using Impl = const int16_t *(*)(int16_t, const int16_t *);
+    using Impl = const int16_t *(TriggerProcessor::*)(int16_t, const int16_t *);
     static constexpr Impl processors[TRIGGER_TYPE_LAST] = {
-        Nop<buffer_length>,
-        FindEdge<buffer_length, stride, std::greater<int16_t>>,  // rising
-        FindEdge<buffer_length, stride, std::less<int16_t>>,     // falling
-        Nop<buffer_length>,
-        Nop<buffer_length>,
+        &TriggerProcessor::Nop<buffer_length>,
+        &TriggerProcessor::FindEdges<buffer_length, stride, std::greater<int16_t>>,  // rising
+        &TriggerProcessor::FindEdges<buffer_length, stride, std::less<int16_t>>,     // falling
+        &TriggerProcessor::Nop<buffer_length>,
+        &TriggerProcessor::Nop<buffer_length>,
     };
-    return processors[trigger_type](threshold, buffer);
+    auto trigger = (this->*processors[trigger_type])(threshold, buffer);
+    if (trigger) ++stats_.trigger_count;
+    return trigger;
+  }
+
+  struct Stats {
+    uint32_t sample_count{0};
+    uint32_t trigger_count{0};
+    uint32_t last_edge{0};
+    uint32_t edge_count{0};
+  };
+
+  const Stats &stats() const { return stats_; }
+
+  void ResetEdgeCounter()
+  {
+    stats_.edge_count = 0;
+    stats_.sample_count = 0;
   }
 
 private:
+  Stats stats_;
+
   template <size_t buffer_length>
-  static const int16_t *Nop(int16_t, const int16_t *buffer)
+  const int16_t *Nop(int16_t, const int16_t *buffer)
   {
+    stats_.sample_count += buffer_length;
     return nullptr;
   }
 
   template <size_t buffer_length, int stride, typename cmp>
-  static const int16_t *FindEdge(int16_t threshold, const int16_t *buffer)
+  const int16_t *FindEdges(int16_t threshold, const int16_t *buffer)
   {
+    auto sample_count = stats_.sample_count;
+    auto last_edge = stats_.last_edge;
+
     auto end = buffer + buffer_length;
-    // ignore starting values that match
-    while (buffer < end && cmp{}(buffer[0], threshold)) buffer += stride;
-    // find first value that matches
-    while (buffer < end) {
-      if (cmp{}(buffer[0], threshold)) return buffer;
-      buffer += stride;
+    const int16_t *trigger = nullptr;
+    for (; buffer < end;) {
+      // ignore starting values that match
+      while (buffer < end && cmp{}(buffer[0], threshold)) {
+        buffer += stride;
+        ++sample_count;
+      }
+      // find first value that matches
+      bool edge = false;
+      while (!edge && buffer < end) {
+        if (cmp{}(buffer[0], threshold)) {
+          if (!trigger) trigger = buffer;
+          ++stats_.edge_count;
+          last_edge = sample_count;
+          edge = true;
+        }
+        buffer += stride;
+        ++sample_count;
+      }
     }
-    return nullptr;
+
+    stats_.sample_count = sample_count;
+    stats_.last_edge = last_edge;
+    return trigger;
   }
 };
 
@@ -108,7 +147,6 @@ static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_
 struct TimebaseParameters {
   const char *const label;
   uint32_t adc_frequency;
-  uint32_t decimation;
   // auto gain?
   // retrigger delay
 };
@@ -188,14 +226,20 @@ public:
   template <size_t buffer_length, int stride>
   const int16_t *Process(const int16_t *buffer)
   {
-    auto head = buffer;
     auto trigger =
-        TriggerProcessor::Process<buffer_length, stride>(trigger_type(), trigger_level(), head);
-    if (trigger) ++trigger_count_;
+        trigger_processor_.Process<buffer_length, stride>(trigger_type(), trigger_level(), buffer);
+
+    auto &stats = trigger_processor_.stats();
+    if (stats.sample_count >= timebase().adc_frequency) {
+      freq_.push(stats.edge_count);
+      trigger_processor_.ResetEdgeCounter();
+    }
+
     return trigger;
   }
 
-  uint32_t trigger_count() const { return trigger_count_; }
+  const TriggerProcessor::Stats stats() const { return trigger_processor_.stats(); }
+  uint32_t frequency() const { return freq_.value(); }
 
   // Settings getters
   int xdiv() const { return get_value(SCOPE_CHANNEL_SETTING_XDIV); }
@@ -220,7 +264,9 @@ public:
   void UpdateEnabledSettings();
 
 private:
-  uint32_t trigger_count_{0};
+  TriggerProcessor trigger_processor_;
+
+  RunningAverage<uint32_t, 4> freq_;
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
@@ -260,6 +306,7 @@ void ScopeChannel::UpdateEnabledSettings()
 
 enum ScopeAppSetting {
   SCOPE_APP_SETTING_CHANNEL,
+  SCOPE_APP_SETTING_FREQ,
   SCOPE_APP_SETTING_LINK12,
   SCOPE_APP_SETTING_LINK34,
   SCOPE_APP_SETTING_RESET,  // dummy
@@ -301,6 +348,11 @@ private:
     menu::ScreenCursor<menu::kScreenLines> cursor;
   } ui_;
 
+  struct {
+    bool triggered = false;
+    int rearm = 0;
+  } trigger_state_;
+
   struct ChannelConfig {
     constexpr ChannelConfig() : packed_value{Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST)} {}
     ChannelConfig(ADC_CHANNEL main) : packed_value{Pack(main, ADC_CHANNEL_LAST)} {}
@@ -318,10 +370,11 @@ private:
   const int16_t *current_display_buffer_ = nullptr;
   ScopeChannel channels_[kNumChannels];
 
-  using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
+  using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 8>;
   using DisplayBuffers = FrameBuffer<kDisplayBufferSize, 2, int16_t>;
 
-  static uint16_t adc_chunk_buffer_[kADCChunkSize];
+  static int16_t adc_chunk_buffer_[kADCChunkSize];
+
   static CircularSampleBuffer sample_buffer_;
   static DisplayBuffers display_buffers_;
 
@@ -371,13 +424,14 @@ private:
   EVENT_DISPATCH_DECLARE_HANDLER(menuEncoderR);
 };
 
-/*static*/ uint16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
+/*static*/ int16_t ScopeApp::adc_chunk_buffer_[kADCChunkSize] __attribute__((aligned(4)));
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
 /*static*/ ScopeApp::DisplayBuffers ScopeApp::display_buffers_ __attribute__((aligned(4)));
 
 SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
+    {1, 0, 1, "Disp freq", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 1+2", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 3+4", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Reset", nullptr, settings::STORAGE_TYPE_NOP},
@@ -391,55 +445,68 @@ void ScopeApp::Init()
 
   display_buffers_.Init();
   ui_.cursor.Init(SCOPE_APP_SETTING_FIRST, SCOPE_APP_SETTING_LAST - 1);
-  // ui_.cursor.AdjustEnd(selected_channel().num_enabled_settings() - 1);
 }
 
 void ScopeApp::Process()
 {
+  // const auto channel_config = channel_config_;
   uint32_t trigger_lost = ui_.trigger_lost;
+
   if (TU::ADC::ReadChunk(adc_chunk_buffer_)) {
     debug::ScopedCycleMeasurement cycles{process_cycles};
 
-    // Pre-process raw samples
-    auto tail = sample_buffer_.tail_buffer();
+    // Process input buffer; if already triggered we don't really need to find a new one yet but
+    // this might handle more than just triggers eventually
+    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer_);
 
-    auto channel_config = channel_config_;
-    const auto offset =
-        TU::ADC::channel_offset(channel_config.main_adc_channel()) + main_channel().yoffset();
-    // TODO Offset of channel two
-#if 1
-    // Unnecessary premature optimization
-    auto dst = tail;
-    auto src = adc_chunk_buffer_;
-    auto end = adc_chunk_buffer_ + kADCChunkSize;
-    uint32_t offs = __PKHBT(offset, offset, 16);
-    while (src < end) {
-      *(uint32_t *)dst = __SSUB16(offs, *(uint32_t *)src);
-      src += 2;
-      dst += 2;
-    }
+    auto sample_writer = sample_buffer_.writer();
+#if 0
+    // Decimate data into circular sample buffer/history
+    util::SampleDecimator::Process<kADCChunkSize>(sample_writer, adc_chunk_buffer_, 1);
+    // TODO account for decimation during further operations
+    // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
 #else
-    std::transform(adc_chunk_buffer_, adc_chunk_buffer_ + kADCChunkSize, tail,
-                   [offset](uint16_t raw) -> int16_t { return offset - raw; });
+    // TODO without decimation, this step is somewhat moot
+    for (auto src = adc_chunk_buffer_, end = src + kADCChunkSize; src < end; ++src)
+      *sample_writer++ = *src;
 #endif
-    sample_buffer_.advance();
+    sample_writer.Commit();
 
-    auto head = sample_buffer_.head_buffer();
-    auto trigger = ADC_CHANNEL_LAST != channel_config.aux_adc_channel()
-                       ? main_channel().Process<kADCChunkSize, 1>(head)
-                       : main_channel().Process<kADCChunkSize, 2>(head);
-    size_t trigger_offset;
-    if (!trigger) {
-      trigger_lost = kTriggerLostIndicatorTimeoutTicks;
-      trigger_offset = 0;
+    // Trigger/display buffer handling
+    size_t read_length = kDisplayBufferSize;
+
+    if (trigger_state_.triggered) {
+      if (sample_buffer_.available() < kDisplayBufferSize) {
+        // still accumulating
+      } else {
+        // buffer full, rearm and start again
+        trigger_state_.triggered = false;
+        trigger_state_.rearm = 8;
+      }
     } else {
-      // trigger_lost = 0;
-      trigger_offset = trigger - head;
+      if (trigger_state_.rearm) {
+        --trigger_state_.rearm;
+        read_length = 0;
+        sample_buffer_.Consume();
+      } else {
+        if (trigger) {
+          trigger_state_.triggered = true;
+          auto n = kADCChunkSize - (trigger - adc_chunk_buffer_);
+          sample_buffer_.SetReadPos(-n - kDisplayBufferSize / 2);
+          read_length = 0;  // kDisplayBufferSize / 2;
+        } else {
+          trigger_lost = kTriggerLostIndicatorTimeoutTicks;
+          sample_buffer_.SetReadPos(-kDisplayBufferSize);
+        }
+      }
     }
 
-    if (display_buffers_.writeable()) {
-      sample_buffer_.ReadHead(display_buffers_.writeable_frame(),
-                              trigger_offset - kDisplayBufferSize / 2, kDisplayBufferSize);
+    if (read_length && display_buffers_.writeable()) {
+      auto display_buffer = display_buffers_.writeable_frame();
+      sample_buffer_.Read(display_buffer, read_length);
+      // TODO What we really want here is to set the length in the display buffer
+      // if (read_length < kDisplayBufferSize)
+      //   std::fill(display_buffer + read_length, display_buffer + kDisplayBufferSize, 0);
       display_buffers_.written();
     }
   }
@@ -878,13 +945,23 @@ void ScopeApp::RenderScopeUI() const
     graphics.printf(channel.scaling().label);
   }
 
+  // Freq
+  if (get_value(SCOPE_APP_SETTING_FREQ)) {
+    graphics.setPrintPos(64 - weegfx::Graphics::kFixedFontH * 6, 0);
+    graphics.printf("%6u", channel.frequency());
+  }
+
   // Info/debug overlay
   if (ui_.info_overlay.visible()) {
-    graphics.setPrintPos(32, 0);
-    graphics.print(channel.trigger_count() & 0xffff, 5);
+    weegfx::coord_t y = 8;
+    graphics.setPrintPos(8, y);
+    graphics.print(channel.stats().trigger_count & 0xffff, 10);
 
-    graphics.setPrintPos(32, 8);
-    graphics.print(debug::cycles_to_us(process_cycles.value()), 5);
+    graphics.setPrintPos(8, y + 8);
+    graphics.print(channel.stats().sample_count, 10);
+
+    graphics.setPrintPos(8, y + 16);
+    graphics.print(debug::cycles_to_us(process_cycles.value()), 10);
   }
 
   graphics.setPrintPos(128 - 30 - 18, 0);

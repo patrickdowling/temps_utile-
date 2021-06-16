@@ -87,6 +87,25 @@ struct SmoothedValue {
   }
 };
 
+template <typename T, T count>
+class RunningAverage {
+ public:
+  T value() const { return sum_ / count; }
+
+  void push(T value) {
+    auto i = index_;
+    auto old_value = values_[i];
+    sum_ = sum_ - old_value + value;
+    values_[i] = value;
+    index_ = (i + 1) % count;
+  }
+
+ private:
+  T values_[count] = {0};
+  T sum_{0};
+  T index_{0};
+};
+
 #define SCALE8_16(x) ((((x + 1) << 16) >> 8) - 1)
 
 #endif // UTIL_MATH_H_

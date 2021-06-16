@@ -27,6 +27,7 @@
 #include <iterator>
 
 #include "TU_gpio.h"
+#include "arm_math.h"
 #include "src/util_misc.h"
 
 // NOTES
@@ -67,7 +68,7 @@ static constexpr ADC::Config kConfigBuffered = {
     .resolution = 12,
     .averaging = 1,
     .sampling_speed = ADC_HIGH_SPEED,
-    .conversion_speed = ADC_HIGH_SPEED,
+    .conversion_speed = ADC_MED_SPEED,
 };
 // 12, 1, ADC_HIGH_SPEED_16BITS, ADC_HIGH_SPEED => ISR @ 3.7KHz x 128 = 474Khz
 // 12, 1, ADC_HIGH_SPEED, ADC_MED_SPEED => ISR @ 2.1KHz x 128 = 268Khz = 3.7us per sample
@@ -76,6 +77,7 @@ static constexpr ADC::Config kConfigBuffered = {
 /*static*/ ADC::ADC_MODE ADC::mode_ = ADC::ADC_MODE_INVALID;
 /*static*/ ::ADC ADC::adc_;
 /*static*/ size_t ADC::last_chunk_ = 0xffffffff;
+/*static*/ uint32_t ADC::packed_offsets_ = 0;
 
 /*static*/ uint32_t ADC::raw_[ADC_CHANNEL_LAST];
 /*static*/ uint32_t ADC::smoothed_[ADC_CHANNEL_LAST];
@@ -198,7 +200,7 @@ static void ADC_DMA_ISR()
   mux.sourceBuffer(adc_mux_buffer, 2 * num_channels);
   mux.destination(*(volatile uint16_t*)&ADC0_SC1A);
 
-  // These are a bit more complex since we want to link them, as well as use the copy-on-completion
+  // These are a bit more complex since we want to link them
   auto tcd = dma_settings_buffered[1].TCD;
   tcd->SADDR = &ADC0_RA;
   tcd->SOFF = 0;
@@ -238,6 +240,10 @@ static void ADC_DMA_ISR()
 
   StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
   StartPDB(freq);
+
+  auto offset1 = channel_offset(channel1);
+  auto offset2 = num_channels > 1 ? channel_offset(channel2) : offset1;
+  packed_offsets_ = __PKHBT(offset1, offset2, 16);
 }
 
 /*static*/ void ADC::StopDMA()
@@ -389,13 +395,31 @@ constexpr uint32_t pdb_prescaler_value(uint32_t prescaler, uint32_t mult)
   }
 }
 
-/*static*/ size_t ADC::ReadChunk(uint16_t* buffer)
+/*static*/ size_t ADC::ReadChunkRaw(uint16_t* buffer)
 {
   auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
   auto chunk =
       (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) % kDMAMaxChunkCount;
   if (chunk != last_chunk_) {
     memcpy(buffer, adc_dma_buffer + chunk * kDMAChunkSize, kDMAChunkSize * 2);
+    last_chunk_ = chunk;
+    return kDMAChunkSize;
+  } else {
+    return 0;
+  }
+}
+
+/*static*/ size_t ADC::ReadChunk(int16_t* buffer)
+{
+  auto tcd_daddr = (const uint16_t*)dma_channel_adc.TCD->DADDR;
+  auto chunk =
+      (((tcd_daddr - adc_dma_buffer) / kDMAChunkSize) + kDMAMaxChunkCount / 2) % kDMAMaxChunkCount;
+  if (chunk != last_chunk_) {
+    auto src_buffer = adc_dma_buffer + chunk * kDMAChunkSize;
+    auto src = (const uint32_t*)src_buffer;
+    auto end = (const uint32_t*)(src_buffer + kDMAChunkSize);
+    auto dst = (uint32_t*)buffer;
+    while (src < end) { *dst++ = __SSUB16(packed_offsets_, *src++); }
     last_chunk_ = chunk;
     return kDMAChunkSize;
   } else {

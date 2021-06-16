@@ -29,32 +29,42 @@
 
 namespace util {
 
-template <typename T, size_t chunk_size, size_t num_chunks>
+template <typename T, size_t buffer_size>
 class CircularSampleBuffer {
 public:
-  static constexpr size_t kChunkSize = chunk_size;
-  static constexpr size_t kNumChunks = num_chunks;
-  static constexpr size_t kBufferSize = kChunkSize * kNumChunks;
+  using value_type = T;
+  static constexpr size_t kBufferSize = buffer_size;
 
-  void advance()
-  {
-    ++head_;
-    ++tail_;
-  }
+  size_t write_pos() const { return write_pos_; }
 
-  // Head is read-only
-  const T *head_buffer() const { return buffer_ + (head_ % kNumChunks) * kChunkSize; }
+  class Writer {
+  public:
+    Writer(CircularSampleBuffer *owner, T *buffer, size_t write_pos)
+        : owner_(owner), buffer_(buffer), write_pos_(write_pos)
+    {}
 
-  // Extract data from head
-  void ReadHead(T *buffer, int32_t start_offset, size_t length) const
-  {
-    auto src = head_buffer() + start_offset;
-    auto end = src + length;
+    T &operator*() { return buffer_[write_pos_]; }
 
-    if (src < buffer_) {
-      buffer = std::copy(end_ - (buffer_ - src), end_, buffer);
-      src = buffer_;
+    Writer &operator++(int)
+    {
+      write_pos_ = (write_pos_ + 1) % kBufferSize;
+      return *this;
     }
+
+    void Commit() { owner_->Commit(write_pos_); }
+
+  private:
+    CircularSampleBuffer *owner_;
+    T *buffer_;
+    size_t write_pos_;
+  };
+
+  Writer writer() { return {this, buffer_, write_pos_}; }
+
+  void Read(T *buffer, size_t length) const
+  {
+    auto src = buffer_ + read_pos_;
+    auto end = src + length;
     if (end > end_) {
       buffer = std::copy(src, end_, buffer);
       std::copy(buffer_, buffer_ + (end - end_), buffer);
@@ -63,15 +73,20 @@ public:
     }
   }
 
-  // Tail is writeable
-  T *tail_buffer() { return buffer_ + (tail_ % kNumChunks) * kChunkSize; }
+  size_t available() const { return write_pos_ - read_pos_; }
+
+  void Consume() { read_pos_ = write_pos_; }
+  void SetReadPos(int32_t offset) { read_pos_ = (size_t)(write_pos_ + offset) % kBufferSize; }
 
 private:
   T buffer_[kBufferSize];
-  const T *end_ = buffer_ + kBufferSize;
+  const T *const end_ = buffer_ + kBufferSize;
+  size_t write_pos_ = 0;
+  size_t read_pos_ = 0;
 
-  size_t head_ = 0;
-  size_t tail_ = kNumChunks - 1;
+  friend class Writer;
+
+  void Commit(size_t write_pos) { write_pos_ = write_pos; }
 };
 
 }  // namespace util
