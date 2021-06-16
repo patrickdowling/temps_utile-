@@ -139,6 +139,8 @@ static void ADC_DMA_ISR()
   adc_.setConversionSpeed(config.conversion_speed);
   adc_.setSamplingSpeed(config.sampling_speed);
   adc_.setAveraging(config.averaging);
+
+  // (void)adc_.analogRead(CV1, 0);
 }
 
 // DMA/ADC à la
@@ -215,22 +217,28 @@ static void ADC_DMA_ISR()
   tcd->DLASTSGA = -(2 * num_samples);
 }
 
-/*static*/ void ADC::StartConversionBuffered(uint32_t freq, ADC_CHANNEL channel)
+/*static*/ void ADC::StartConversionBuffered(uint32_t freq, ADC_CHANNEL channel1,
+                                             ADC_CHANNEL channel2)
 {
-  if (ADC_MODE_BUFFERED != mode_) {
-    ADC_SERIAL_PRINTLN("StartConversionBuffered");
+  ADC_SERIAL_PRINTLN("StartConversionBuffered(freq=%lu, channel1=%d, channel2=%d)", freq, channel1,
+                     channel2);
 
-    StopDMA();
-    Configure(kConfigBuffered);
+  bool configure_adc = ADC_MODE_BUFFERED != mode_;
 
-    adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
-    StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
-    StartPDB(freq);
-  } else {
-    // Changing parameters on-the-fly. We too like to live dangerously...
-    adc_mux_buffer[0] = SCA_CHANNEL_ID[channel];
-    StartPDB(freq);
+  StopPDB();
+  StopDMA();
+  if (configure_adc) Configure(kConfigBuffered);
+
+  unsigned int num_channels = 1;
+  adc_mux_buffer[0] = SCA_CHANNEL_ID[channel1];
+  if (ADC_CHANNEL_LAST != channel2) {
+    adc_mux_buffer[1] = SCA_CHANNEL_ID[channel2];
+    ++num_channels;
   }
+  dma_settings_buffered[0].sourceBuffer(adc_mux_buffer, 2 * num_channels);
+
+  StartDMA(ADC_MODE_BUFFERED, dma_settings_buffered);
+  StartPDB(freq);
 }
 
 /*static*/ void ADC::StopDMA()
