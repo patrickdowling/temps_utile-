@@ -457,8 +457,7 @@ void ScopeApp::OnEncoder(const UI::Event &event)
   } else {
     if (TU::CONTROL_ENCODER_L == event.control) {
       if (current_channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event.value))
-        TU::ADC::StartConversionBuffered(ADC_CHANNEL_1,
-                                         kTimebaseParameters[current_channel.xdiv()].adc_frequency);
+        TU::ADC::StartConversionBuffered(current_channel.timebase().adc_frequency, ADC_CHANNEL_1);
       ui_.xdiv_display.show();
     } else if (TU::CONTROL_ENCODER_R == event.control) {
       if (ui_.edit_trigger_level) {
@@ -638,7 +637,7 @@ void ScopeApp::RenderScopeUI() const
 
 void ScopeApp::Activate()
 {
-  TU::ADC::StartConversionBuffered(ADC_CHANNEL_1, 1000 * 128);
+  TU::ADC::StartConversionBuffered(current_channel().timebase().adc_frequency, ADC_CHANNEL_1);
 }
 
 static ScopeApp scope_app_instance;

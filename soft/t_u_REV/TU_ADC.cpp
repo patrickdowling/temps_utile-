@@ -215,7 +215,7 @@ static void ADC_DMA_ISR()
   tcd->DLASTSGA = -(2 * num_samples);
 }
 
-/*static*/ void ADC::StartConversionBuffered(ADC_CHANNEL channel, uint32_t freq)
+/*static*/ void ADC::StartConversionBuffered(uint32_t freq, ADC_CHANNEL channel)
 {
   if (ADC_MODE_BUFFERED != mode_) {
     ADC_SERIAL_PRINTLN("StartConversionBuffered");

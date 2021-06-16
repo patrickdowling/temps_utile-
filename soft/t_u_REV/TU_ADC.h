@@ -84,7 +84,7 @@ public:
   static void StartConversionNormal();
 
   // Start conversions in buffered mode (details TBD)
-  static void StartConversionBuffered(ADC_CHANNEL channel, uint32_t freq);
+  static void StartConversionBuffered(uint32_t freq, ADC_CHANNEL channel);
 
   // Periodic update function (expected to run in main ISR)
   static void Update();
