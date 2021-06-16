@@ -29,5 +29,8 @@
 #include "TU_apps.h"
 DECLARE_APP_INTERFACE(SCOPE)
 
+#define SCOPE_APP_NAME "silloscope"
+// #define SCOPE_APP_NAME "Temps Utool" // *groan*
+
 #endif  // TU_APP_SCOPE_H_
 

@@ -54,7 +54,17 @@ static constexpr weegfx::coord_t kDisplayFrameSize = weegfx::Graphics::kWidth;
 static constexpr size_t kADCChunkSize = TU::ADC::kDMAChunkSize;
 static constexpr uint32_t kTriggerLostIndicatorTimeoutTicks = TU_CORE_ISR_FREQ / 3;
 
+static constexpr weegfx::coord_t kScreenHeight = weegfx::Graphics::kHeight;
+static constexpr weegfx::coord_t kScreenCenterY = kScreenHeight / 2;
+
 static debug::AveragedCycles process_cycles;
+
+enum InputRange {
+  INPUT_RANGE_BI,
+  INPUT_RANGE_UNI,
+  INPUT_RANGE_LAST,
+  INPUT_RANGE_FIRST = INPUT_RANGE_BI
+};
 
 // Helper class to process buffers and find triggers
 //
@@ -234,8 +244,9 @@ static constexpr ScalingParameters kScalingParameters[DIV_LAST] = {
 // Scope channel class; maintains settings and can process buffers
 //
 enum ScopeChannelSetting {
-  SCOPE_CHANNEL_SETTING_XOFF,
-  SCOPE_CHANNEL_SETTING_YOFF,
+  SCOPE_CHANNEL_SETTING_RANGE,
+  SCOPE_CHANNEL_SETTING_XOFF,  // screen space
+  SCOPE_CHANNEL_SETTING_YOFF,  // screen space
   SCOPE_CHANNEL_SETTING_XDIV,
   SCOPE_CHANNEL_SETTING_YDIV,
   SCOPE_CHANNEL_SETTING_TRIG_TYPE,
@@ -279,10 +290,15 @@ public:
   uint32_t frequency() const { return freq_.value(); }
 
   // Settings getters
+  int input_range() const { return get_value(SCOPE_CHANNEL_SETTING_RANGE); }
   int xdiv() const { return get_value(SCOPE_CHANNEL_SETTING_XDIV); }
-  int xoffset() const { return get_value(SCOPE_CHANNEL_SETTING_XOFF); }
   int ydiv() const { return get_value(SCOPE_CHANNEL_SETTING_YDIV); }
-  int yoffset() const { return get_value(SCOPE_CHANNEL_SETTING_YOFF); }
+
+  int screen_xoffset() const { return get_value(SCOPE_CHANNEL_SETTING_XOFF); }
+  int screen_yoffset() const
+  {
+    return INPUT_RANGE_BI == input_range() ? kScreenCenterY : kScreenHeight;
+  }
 
   TriggerProcessor::TriggerType trigger_type() const
   {
@@ -291,16 +307,14 @@ public:
 
   int16_t trigger_level() const
   {
-    return static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
+    auto level = static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
+    return INPUT_RANGE_BI == input_range() ? level : level + 2048;
   }
 
   int trigger_holdoff() const { return get_value(SCOPE_CHANNEL_SETTING_TRIG_HOLDOFF); }
 
   const TimebaseParameters &timebase() const { return kTimebaseParameters[xdiv()]; }
   const ScalingParameters &scaling() const { return kScalingParameters[ydiv()]; }
-
-  // UI helpers
-  void UpdateEnabledSettings();
 
 private:
   TriggerProcessor trigger_processor_;
@@ -309,7 +323,9 @@ private:
 };
 
 SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
-    // default, min, max, name, value_names, storage_type, parent_index, parent_valuea
+    // default, min, max, name, value_names, storage_type, parent_index, parent_value
+    {scope::INPUT_RANGE_BI, scope::INPUT_RANGE_FIRST, scope::INPUT_RANGE_LAST, "Uni/bi", nullptr,
+     settings::STORAGE_TYPE_U4},
     {0, 0, 127, "XOFF", nullptr, settings::STORAGE_TYPE_I16},
     {0, -32, 32, "YOFF", nullptr, settings::STORAGE_TYPE_I16},
     {1, 0, scope::TIMEBASE_LAST - 1, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
@@ -325,33 +341,16 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
 void ScopeChannel::Init()
 {
   InitDefaults();
-  UpdateEnabledSettings();
-}
-
-void ScopeChannel::UpdateEnabledSettings()
-{
-  enabled_settings_reset();
-  enabled_settings_add(SCOPE_CHANNEL_SETTING_TRIG_TYPE);
-  switch (trigger_type()) {
-    case TriggerProcessor::TRIGGER_TYPE_NONE:
-    case TriggerProcessor::TRIGGER_TYPE_EXT1:
-    case TriggerProcessor::TRIGGER_TYPE_EXT2: break;
-    default: enabled_settings_add(SCOPE_CHANNEL_SETTING_TRIG_LEVEL);
-  }
-  enabled_settings_add(SCOPE_CHANNEL_SETTING_XOFF);
-  enabled_settings_add(SCOPE_CHANNEL_SETTING_YOFF);
-  enabled_settings_add(SCOPE_CHANNEL_SETTING_XDIV);
-  enabled_settings_add(SCOPE_CHANNEL_SETTING_YDIV);
 }
 
 enum ScopeAppSetting {
   SCOPE_APP_SETTING_CHANNEL,
-  SCOPE_APP_SETTING_FREQ,
+  SCOPE_APP_SETTING_FREQ_COUNTER,
+  SCOPE_APP_SETTING_STATS_OVERLAY,
   SCOPE_APP_SETTING_LINK12,
   SCOPE_APP_SETTING_LINK34,
-  SCOPE_APP_SETTING_RESET,  // dummy
+  SCOPE_APP_SETTING_RESET,
   SCOPE_APP_SETTING_LAST,
-  SCOPE_APP_SETTING_FIRST = SCOPE_APP_SETTING_CHANNEL
 };
 
 class ScopeApp : public settings::SettingsBase<ScopeApp, SCOPE_APP_SETTING_LAST>,
@@ -372,6 +371,9 @@ public:
   void EventScreensaverOff();
   void Activate();
 
+  bool display_frequency_counter() const { return get_value(SCOPE_APP_SETTING_FREQ_COUNTER); }
+  bool display_stats_overlay() const { return get_value(SCOPE_APP_SETTING_STATS_OVERLAY); }
+
 private:
   struct {
     bool menu_active = false;
@@ -383,7 +385,6 @@ private:
 
     util::PopupElement edit_setting;
     util::PopupElement status_bar;
-    util::PopupElement info_overlay;
 
     menu::ScreenCursor<menu::kScreenLines> cursor;
   } ui_;
@@ -438,7 +439,8 @@ private:
   void ConfigureADC();
 
   static void DrawGrid();
-  static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier);
+  static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
+                           const weegfx::coord_t y);
   void RenderDisplayBuffer() const;
   void RenderMenu() const;
   void RenderScopeUI() const;
@@ -456,7 +458,7 @@ private:
   static const EventHandler scope_button_handlers[];
 
   EVENT_DISPATCH_DECLARE_HANDLER(toggleMenu);
-  EVENT_DISPATCH_DECLARE_HANDLER(scopeInfoOverlay);
+  EVENT_DISPATCH_DECLARE_HANDLER(toggleInputRange);
   EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonDown);
   EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonL);
   EVENT_DISPATCH_DECLARE_HANDLER(scopeButtonR);
@@ -475,10 +477,10 @@ SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
     {1, 0, 1, "Disp freq", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
+    {0, 0, 1, "Disp stats", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 1+2", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 3+4", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
-    {0, 0, 1, "Reset", nullptr, settings::STORAGE_TYPE_NOP},
-};
+    {0, 0, 0, "Reset", nullptr, settings::STORAGE_TYPE_NOP}};
 
 void ScopeApp::Init()
 {
@@ -487,7 +489,7 @@ void ScopeApp::Init()
   UpdateChannelConfig();
 
   display_frame_buffer_.Init();
-  ui_.cursor.Init(SCOPE_APP_SETTING_FIRST, SCOPE_APP_SETTING_LAST - 1);
+  ui_.cursor.Init(SCOPE_APP_SETTING_FREQ_COUNTER, SCOPE_APP_SETTING_LINK34);
 }
 
 void ScopeApp::Process()
@@ -564,7 +566,6 @@ void ScopeApp::UpdateUI()
   auto ticks = TU::ui.ticks();
   ui_.edit_setting.Tick(ticks);
   ui_.status_bar.Tick(ticks);
-  ui_.info_overlay.Tick(ticks);
 }
 
 size_t ScopeApp::SaveState(util::StreamBufferWriter &stream_buffer) const
@@ -597,7 +598,7 @@ size_t ScopeApp::RestoreState(util::StreamBufferReader &stream_buffer)
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::scopeButtonDown},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_L, &ScopeApp::scopeButtonL},
     {UI::EVENT_BUTTON_PRESS, TU::CONTROL_BUTTON_R, &ScopeApp::scopeButtonR},
-    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::scopeInfoOverlay},
+    {UI::EVENT_BUTTON_LONG_PRESS, TU::CONTROL_BUTTON_DOWN, &ScopeApp::toggleInputRange},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_L, &ScopeApp::scopeEncoderL},
     {UI::EVENT_ENCODER, TU::CONTROL_ENCODER_R, &ScopeApp::scopeEncoderR},
     {},
@@ -611,15 +612,16 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, toggleMenu)
     ui_.menu_active = false;
   } else {
     ui_.menu_active = true;
-    // ui_.cursor.AdjustEnd(current_channel().num_enabled_settings());
   }
 }
 
-EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeInfoOverlay)
+EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, toggleInputRange)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  ui_.info_overlay.show();
+  auto &channel = selected_channel();
+  channel.apply_value(SCOPE_CHANNEL_SETTING_RANGE,
+                      INPUT_RANGE_BI == channel.input_range() ? INPUT_RANGE_UNI : INPUT_RANGE_BI);
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonDown)
@@ -628,7 +630,6 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonDown)
 
   auto &channel = selected_channel();
   channel.change_value_wrap(SCOPE_CHANNEL_SETTING_TRIG_TYPE, 1);
-  channel.UpdateEnabledSettings();
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonL)
@@ -823,23 +824,25 @@ void ScopeApp::RenderMenu() const
   }
 }
 
-static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
+static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier,
+                                       const weegfx::coord_t y)
 {
   // kScalingShift = 10 + /64 = >>16
-  auto px = 32 - signed_multiply_32x16b(multiplier, value);
+  auto px = y - signed_multiply_32x16b(multiplier, value);
   CONSTRAIN(px, 0, 63);
   return px;
 }
 
-/*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier)
+/*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier,
+                                       const weegfx::coord_t y)
 {
   auto end = buffer + kDisplayFrameSize;
 
   weegfx::coord_t x = 0;
-  auto y1 = to_pixel(*buffer, multiplier);
+  auto y1 = to_pixel(*buffer, multiplier, y);
   buffer += stride;
   while (buffer < end) {
-    auto y2 = to_pixel(*buffer, multiplier);
+    auto y2 = to_pixel(*buffer, multiplier, y);
     buffer += stride;
     graphics.drawLine(x, y1, x + stride, y2);
     y1 = y2;
@@ -853,10 +856,13 @@ void ScopeApp::RenderDisplayBuffer() const
   if (!frame) return;
 
   if (ADC_CHANNEL_LAST != channel_config_.aux_adc_channel()) {
-    DrawWaveform(frame->buffer, 2, main_channel().scaling().multiplier);
-    DrawWaveform(frame->buffer + 1, 2, aux_channel().scaling().multiplier);
+    DrawWaveform(frame->buffer, 2, main_channel().scaling().multiplier,
+                 main_channel().screen_yoffset());
+    DrawWaveform(frame->buffer + 1, 2, aux_channel().scaling().multiplier,
+                 aux_channel().screen_yoffset());
   } else {
-    DrawWaveform(frame->buffer, 1, main_channel().scaling().multiplier);
+    DrawWaveform(frame->buffer, 1, main_channel().scaling().multiplier,
+                 main_channel().screen_yoffset());
   }
 }
 
@@ -873,6 +879,9 @@ static const uint8_t trigger_ext2_8x8[] = {0x04, 0x7c, 0x04, 0x70, 0x10, 0x00, 0
 
 static const uint8_t trigger_lost_6x8[] = {0x00, 0x02, 0x01, 0x51, 0x09, 0x06};
 static const uint8_t trigger_level_3x8[] = {0x3e, 0x1c, 0x08};
+
+static const uint8_t range_bi_7x8[] = {0xf0, 0x50, 0x30, 0x10, 0x18, 0x14, 0x1e, 0x00};
+static const uint8_t range_uni_7x8[] = {0x80, 0xc0, 0xa0, 0x90, 0x88, 0x84, 0xfe, 0x00};
 
 static constexpr const uint8_t *channels[4] = {
     channel_1_7x8,
@@ -917,14 +926,14 @@ void ScopeApp::RenderScopeUI() const
 
   // Top [channel] .... [freq][trigger]
   if (!ui_.status_bar.visible()) {
-    weegfx::coord_t y = channel.yoffset();
-    CONSTRAIN(y, 0, 8);
+    weegfx::coord_t y = channel.screen_yoffset() - 7;
+    CONSTRAIN(y, 0, 64 - 8);
     graphics.writeBitmap8(3, y, 7, icons::channels[channel_index]);
   }
 
   auto trigger_type = channel.trigger_type();
 
-  if (get_value(SCOPE_APP_SETTING_FREQ) && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
+  if (display_frequency_counter() && TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
     weegfx::coord_t x = 128 - 18;
     weegfx::coord_t y = 0;
     weegfx::coord_t w = sizeof(icons::unit_khz_8);
@@ -955,7 +964,8 @@ void ScopeApp::RenderScopeUI() const
   if (ui_.trigger_lost) { graphics.writeBitmap8(x, 0, 6, icons::trigger_lost_6x8); }
 
   // Left: Trigger level
-  auto trigger_level_y = to_pixel(channel.trigger_level(), channel.scaling().multiplier) - 3;
+  auto trigger_level_y =
+      to_pixel(channel.trigger_level(), channel.scaling().multiplier, channel.screen_yoffset()) - 3;
   if (TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
     CONSTRAIN(trigger_level_y, 0, 58);
     graphics.writeBitmap8(0, trigger_level_y, 3, icons::trigger_level_3x8);
@@ -1005,6 +1015,11 @@ void ScopeApp::RenderScopeUI() const
       case 'u': graphics.drawBitmap8(x + 18 + 1, bottom_text_y, 6, icons::unit_us_8); break;
     }
 
+    x = 96 - 8;
+    auto range_icon =
+        INPUT_RANGE_BI == channel.input_range() ? icons::range_bi_7x8 : icons::range_uni_7x8;
+    graphics.writeBitmap8(x, bottom_text_y - 1, 7, range_icon);
+
     x = 96 + 6;
     if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r)
       icons::DrawEditIcon(x - 1, bottom_text_y - 1, channel.ydiv(),
@@ -1014,7 +1029,7 @@ void ScopeApp::RenderScopeUI() const
   }
 
   // Info/debug overlay
-  if (ui_.info_overlay.visible()) {
+  if (display_stats_overlay()) {
     weegfx::coord_t x = 64 - 48;
     weegfx::coord_t y = 8;
     graphics.setPrintPos(x, y);

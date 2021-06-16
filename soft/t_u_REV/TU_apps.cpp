@@ -35,7 +35,7 @@
 
 static constexpr TU::App available_apps[] = {
   INSTANTIATE_APP("CL", 0x0102, "6xclocks", CLOCKS),
-  INSTANTIATE_APP("SC", 0x0100, "silloscope", SCOPE),
+  INSTANTIATE_APP("SC", 0x0100, SCOPE_APP_NAME, SCOPE),
 };
 
 static constexpr int NUM_AVAILABLE_APPS = ARRAY_SIZE(available_apps);

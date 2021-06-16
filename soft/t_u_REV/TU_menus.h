@@ -131,7 +131,7 @@ public:
 
   inline int last_visible() const {
     if (end_ - start_ < 4)
-      return end_ - start_;
+      return end_;
     else
       return cursor_pos_ - screen_line_ + screen_lines - 1;
   }
