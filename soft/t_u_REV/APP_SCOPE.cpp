@@ -103,7 +103,7 @@ static constexpr const char *kTriggerTypeStrings[TriggerProcessor::TRIGGER_TYPE_
     "none", "rising", "falling", "ext1", "ext2",
 };
 
-enum TimebaseDivision {
+enum Timebase {
   TIMEBASE_100,
   TIMEBASE_200,
   TIMEBASE_500,
@@ -115,13 +115,41 @@ enum TimebaseDivision {
 struct TimebaseParameters {
   const char *const label;
   uint32_t adc_frequency;
-  // gain?
+  // auto gain?
+  // retrigger delay
 };
 
 static constexpr TimebaseParameters kTimebaseParameters[TIMEBASE_LAST] = {
     {"100", .adc_frequency = 100 * 128},   {"200", .adc_frequency = 200 * 128},
     {"500", .adc_frequency = 500 * 128},   {"1000", .adc_frequency = 1000 * 128},
     {"2000", .adc_frequency = 2000 * 128},
+};
+
+enum Scaling {
+  DIV_0V5,
+  DIV_1V,
+  DIV_2V,
+  DIV_5V,
+  DIV_10V,
+  DIV_LAST,
+};
+
+static constexpr int32_t kScalingShift = 8;
+struct ScalingParameters {
+  const char *label;
+  int32_t multiplier;
+  // grid spacing?
+};
+
+static constexpr int32_t scaling_multiplier(float division)
+{
+  return 5.f / division * (float)(1 << kScalingShift);
+}
+
+static constexpr ScalingParameters kScalingParameters[DIV_LAST] = {
+    {"0.5V", scaling_multiplier(0.5f)}, {"  1V", scaling_multiplier(1.f)},
+    {"  2V", scaling_multiplier(2.f)},  {"  5V", scaling_multiplier(5.f)},
+    {" 10V", scaling_multiplier(10.f)},
 };
 
 // Scope channel class; maintains settings and can process buffers
@@ -154,7 +182,9 @@ public:
 
   // Settings getters
   int xdiv() const { return get_value(SCOPE_CHANNEL_SETTING_XDIV); }
+  int xoffset() const { return get_value(SCOPE_CHANNEL_SETTING_XOFF); }
   int ydiv() const { return get_value(SCOPE_CHANNEL_SETTING_YDIV); }
+  int yoffset() const { return get_value(SCOPE_CHANNEL_SETTING_YOFF); }
 
   TriggerProcessor::TriggerType trigger_type() const
   {
@@ -166,7 +196,8 @@ public:
     return static_cast<int16_t>(get_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL));
   }
 
-  const TimebaseParameters &current_timebase() const { return kTimebaseParameters[xdiv()]; }
+  const TimebaseParameters &timebase() const { return kTimebaseParameters[xdiv()]; }
+  const ScalingParameters &scaling() const { return kScalingParameters[ydiv()]; }
 
   // UI helpers
   void UpdateEnabledSettings();
@@ -185,7 +216,8 @@ SETTINGS_DECLARE(scope::ScopeChannel, scope::SCOPE_CHANNEL_SETTING_LAST){
     {0, 0, 127, "XOFF", nullptr, settings::STORAGE_TYPE_I16},
     {0, -32, 32, "YOFF", nullptr, settings::STORAGE_TYPE_I16},
     {1, 0, scope::TIMEBASE_LAST - 1, "XDIV", nullptr, settings::STORAGE_TYPE_U8},
-    {1, 1, 4, "YDIV", nullptr, settings::STORAGE_TYPE_U8},
+    {scope::DIV_5V, scope::DIV_0V5, scope::DIV_LAST - 1, "YDIV", nullptr,
+     settings::STORAGE_TYPE_U8},
     {scope::TriggerProcessor::TRIGGER_TYPE_RISING, scope::TriggerProcessor::TRIGGER_TYPE_NONE,
      scope::TriggerProcessor::TRIGGER_TYPE_LAST - 1, "TRIG TYPE", scope::kTriggerTypeStrings,
      settings::STORAGE_TYPE_U8},
@@ -241,6 +273,7 @@ public:
 private:
   struct {
     bool menu_active = false;
+
     bool edit_trigger_level = false;
 
     util::PopupElement xdiv_display;
@@ -270,7 +303,7 @@ private:
   const ScopeChannel &current_channel() const { return channels_[current_channel_]; }
 
   void RenderMenu() const;
-  void RenderScope() const;
+  void RenderDisplayBuffer() const;
   void RenderScopeUI() const;
 
   void UpdateDisplayBuffer();
@@ -297,7 +330,8 @@ void ScopeApp::Process()
 
     // Pre-process raw samples
     auto tail = sample_buffer_.tail_buffer();
-    const auto offset = TU::ADC::channel_offset(current_adc_channel());
+    const auto offset =
+        TU::ADC::channel_offset(current_adc_channel()) + current_channel().yoffset();
 #if 1
     // Unnecessary premature optimization
     auto dst = tail;
@@ -444,7 +478,7 @@ void ScopeApp::Render()  // const
   } else {
     UpdateDisplayBuffer();
     RenderGrid();
-    RenderScope();
+    RenderDisplayBuffer();
     RenderScopeUI();
   }
 }
@@ -452,7 +486,7 @@ void ScopeApp::Render()  // const
 void ScopeApp::RenderScreensaver()  // const
 {
   UpdateDisplayBuffer();
-  RenderScope();
+  RenderDisplayBuffer();
 }
 
 void ScopeApp::EventScreensaverOff()
@@ -490,22 +524,25 @@ void ScopeApp::RenderMenu() const
     auto &attr = ScopeChannel::value_attr(setting);
 
     switch (setting) {
+      case SCOPE_CHANNEL_SETTING_YDIV:
+        list_item.DrawDefault(channel.scaling().label, value, attr);
+        break;
       default: list_item.DrawDefault(value, attr); break;
     }
   }
 }
 
-void ScopeApp::RenderScope() const
+void ScopeApp::RenderDisplayBuffer() const
 {
   auto &channel = current_channel();
 
   auto display_buffer = current_display_buffer_;
   if (display_buffer) {
-    auto ydiv = channel.ydiv();
-    auto y1 = 32 - ((ydiv * display_buffer[0]) >> 6);
+    auto multiplier = channel.scaling().multiplier;
+    auto y1 = 32 - ((multiplier * display_buffer[0]) >> (kScalingShift + 6));
     CONSTRAIN(y1, 0, 63);
     for (weegfx::coord_t x = 0; x < kDisplayBufferSize - 1; ++x) {
-      auto y2 = 32 - ((ydiv * display_buffer[x]) >> 6);
+      auto y2 = 32 - ((multiplier * display_buffer[x]) >> (kScalingShift + 6));
       CONSTRAIN(y2, 0, 63);
 
       graphics.drawLine(x, y1, x + 1, y2);
@@ -553,7 +590,7 @@ void ScopeApp::RenderScopeUI() const
 
   if (ui_.xdiv_display.visible()) {
     graphics.setPrintPos(64, bottom_text_y);
-    graphics.print(channel.current_timebase().label);
+    graphics.print(channel.timebase().label);
   }
 
   auto y = 32 - (channel.trigger_level() >> 6) - 3;
@@ -566,8 +603,8 @@ void ScopeApp::RenderScopeUI() const
       graphics.setPrintPos(5, y);
       graphics.pretty_print(channel.trigger_level(), 5);
     } else {
-      graphics.setPrintPos(128 - 2 * weegfx::Graphics::kFixedFontW, bottom_text_y);
-      graphics.printf("x%d", channel.ydiv());
+      graphics.setPrintPos(128 - 4 * weegfx::Graphics::kFixedFontW, bottom_text_y);
+      graphics.printf(channel.scaling().label);
     }
   }
 
