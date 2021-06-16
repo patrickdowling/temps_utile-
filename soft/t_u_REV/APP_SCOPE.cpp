@@ -288,32 +288,48 @@ private:
     menu::ScreenCursor<menu::kScreenLines> cursor;
   } ui_;
 
+  struct ChannelConfig {
+    constexpr ChannelConfig() : packed_value{Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST)} {}
+    ChannelConfig(ADC_CHANNEL main) : packed_value{Pack(main, ADC_CHANNEL_LAST)} {}
+    ChannelConfig(ADC_CHANNEL main, ADC_CHANNEL aux) : packed_value{Pack(main, aux)} {}
+
+    ADC_CHANNEL main_adc_channel() const { return static_cast<ADC_CHANNEL>(packed_value & 0xffff); }
+    ADC_CHANNEL aux_adc_channel() const { return static_cast<ADC_CHANNEL>((packed_value >> 16)); }
+
+    int packed_value = Pack(ADC_CHANNEL_1, ADC_CHANNEL_LAST);
+
+    static constexpr int Pack(int main, int aux) { return main | (aux << 16); }
+  };
+
+  ChannelConfig channel_config_ = {};
+  const int16_t *current_display_buffer_ = nullptr;
+  ScopeChannel channels_[kNumChannels];
+
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize, 4>;
   using DisplayBuffers = FrameBuffer<kDisplayBufferSize, 2, int16_t>;
-
-  const int16_t *current_display_buffer_ = nullptr;
 
   static uint16_t adc_chunk_buffer_[kADCChunkSize];
   static CircularSampleBuffer sample_buffer_;
   static DisplayBuffers display_buffers_;
 
-  ScopeChannel channels_[kNumChannels];
+  const ScopeChannel &main_channel() const { return channels_[channel_config_.main_adc_channel()]; }
+  ScopeChannel &main_channel() { return channels_[channel_config_.main_adc_channel()]; }
 
-  int current_channel_index() const { return get_value(SCOPE_APP_SETTING_CHANNEL); }
+  const ScopeChannel &aux_channel() const { return channels_[channel_config_.aux_adc_channel()]; }
 
-  ADC_CHANNEL current_adc_channel() const
-  {
-    return static_cast<ADC_CHANNEL>(current_channel_index());
-  }
-
-  ScopeChannel &current_channel() { return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)]; }
-  const ScopeChannel &current_channel() const
+  int selected_channel_index() const { return get_value(SCOPE_APP_SETTING_CHANNEL); }
+  ScopeChannel &selected_channel() { return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)]; }
+  const ScopeChannel &selected_channel() const
   {
     return channels_[get_value(SCOPE_APP_SETTING_CHANNEL)];
   }
 
-  static void RenderGrid();
-  static void RenderDisplayBuffer(const int16_t *display_buffer, const int32_t multiplier);
+  void UpdateChannelConfig();
+  void ConfigureADC();
+
+  static void DrawGrid();
+  static void DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier);
+  void RenderDisplayBuffer() const;
   void RenderMenu() const;
   void RenderScopeUI() const;
 
@@ -358,10 +374,11 @@ void ScopeApp::Init()
 {
   InitDefaults();
   for (auto &channel : channels_) channel.Init();
+  UpdateChannelConfig();
 
   display_buffers_.Init();
   ui_.cursor.Init(SCOPE_APP_SETTING_FIRST, SCOPE_APP_SETTING_LAST - 1);
-  // ui_.cursor.AdjustEnd(current_channel().num_enabled_settings() - 1);
+  // ui_.cursor.AdjustEnd(selected_channel().num_enabled_settings() - 1);
 }
 
 void ScopeApp::Process()
@@ -372,8 +389,11 @@ void ScopeApp::Process()
 
     // Pre-process raw samples
     auto tail = sample_buffer_.tail_buffer();
+
+    auto channel_config = channel_config_;
     const auto offset =
-        TU::ADC::channel_offset(current_adc_channel()) + current_channel().yoffset();
+        TU::ADC::channel_offset(channel_config.main_adc_channel()) + main_channel().yoffset();
+    // TODO Offset of channel two
 #if 1
     // Unnecessary premature optimization
     auto dst = tail;
@@ -392,7 +412,9 @@ void ScopeApp::Process()
     sample_buffer_.advance();
 
     auto head = sample_buffer_.head_buffer();
-    auto trigger = current_channel().Process<kADCChunkSize, 1>(head);
+    auto trigger = ADC_CHANNEL_LAST != channel_config.aux_adc_channel()
+                       ? main_channel().Process<kADCChunkSize, 1>(head)
+                       : main_channel().Process<kADCChunkSize, 2>(head);
     size_t trigger_offset;
     if (!trigger) {
       trigger_lost = kTriggerLostIndicatorTimeoutTicks;
@@ -481,7 +503,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonDown)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  auto &channel = current_channel();
+  auto &channel = selected_channel();
   channel.change_value_wrap(SCOPE_CHANNEL_SETTING_TRIG_TYPE, 1);
   channel.UpdateEnabledSettings();
 }
@@ -502,7 +524,7 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeButtonR)
   EVENT_DISPATCH_HANDLER_STUB();
 
   if (SCOPE_CHANNEL_SETTING_YDIV == ui_.edit_setting_r &&
-      TriggerProcessor::TRIGGER_TYPE_NONE != current_channel().trigger_type()) {
+      TriggerProcessor::TRIGGER_TYPE_NONE != selected_channel().trigger_type()) {
     ui_.edit_setting_r = SCOPE_CHANNEL_SETTING_TRIG_LEVEL;
     ui_.edit_setting.show();
     ui_.status_bar.hide();
@@ -517,28 +539,30 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderL)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  auto &channel = current_channel();
+  auto &channel = selected_channel();
   bool update_adc = false;
   switch (ui_.edit_setting_l) {
     case SCOPE_CHANNEL_SETTING_XDIV:
       update_adc = channel.change_value(SCOPE_CHANNEL_SETTING_XDIV, event_value);
       break;
     case SCOPE_CHANNEL_SETTING_LAST:
-      update_adc = change_value(SCOPE_APP_SETTING_CHANNEL, event_value);
+      if (change_value(SCOPE_APP_SETTING_CHANNEL, event_value)) {
+        UpdateChannelConfig();
+        update_adc = true;
+      }
       break;
     default: break;
   }
   ui_.edit_setting.hide();
   ui_.status_bar.show();
-  if (update_adc)
-    TU::ADC::StartConversionBuffered(channel.timebase().adc_frequency, current_adc_channel());
+  if (update_adc) ConfigureADC();
 }
 
 EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, scopeEncoderR)
 {
   EVENT_DISPATCH_HANDLER_STUB();
 
-  auto &channel = current_channel();
+  auto &channel = selected_channel();
   switch (ui_.edit_setting_r) {
     case SCOPE_CHANNEL_SETTING_TRIG_LEVEL:
       channel.change_value(SCOPE_CHANNEL_SETTING_TRIG_LEVEL, event_value * 32);
@@ -574,11 +598,42 @@ EVENT_DISPATCH_DEFINE_HANDLER(ScopeApp, menuEncoderR)
   if (!ui_.cursor.editing()) {
     ui_.cursor.Scroll(event_value);
   } else {
-    change_value(ui_.cursor.cursor_pos(), event_value);
+    auto setting = ui_.cursor.cursor_pos();
+    if (change_value(setting, event_value)) {
+      switch (setting) {
+        case SCOPE_APP_SETTING_LINK12:
+        case SCOPE_APP_SETTING_LINK34:
+          UpdateChannelConfig();
+          ConfigureADC();
+          break;
+        default: break;
+      }
+    }
   }
 }
 
-/*static*/ void ScopeApp::RenderGrid()
+void ScopeApp::UpdateChannelConfig()
+{
+  ADC_CHANNEL main = static_cast<ADC_CHANNEL>(get_value(SCOPE_APP_SETTING_CHANNEL));
+  ADC_CHANNEL aux;
+  if (ADC_CHANNEL_1 == main && get_value(SCOPE_APP_SETTING_LINK12))
+    aux = ADC_CHANNEL_2;
+  else if (ADC_CHANNEL_3 == main && get_value(SCOPE_APP_SETTING_LINK34))
+    aux = ADC_CHANNEL_4;
+  else
+    aux = ADC_CHANNEL_LAST;
+
+  channel_config_ = {main, aux};
+}
+
+void ScopeApp::ConfigureADC()
+{
+  TU::ADC::StartConversionBuffered(main_channel().timebase().adc_frequency,
+                                   channel_config_.main_adc_channel(),
+                                   channel_config_.aux_adc_channel());
+}
+
+/*static*/ void ScopeApp::DrawGrid()
 {
   graphics.drawVLinePattern(16, 0, 64, 0x88);
   graphics.drawVLinePattern(32, 0, 64, 0x88);
@@ -599,9 +654,8 @@ void ScopeApp::Render()  // const
     RenderMenu();
   } else {
     UpdateDisplayBuffer();
-    RenderGrid();
-    auto display_buffer = current_display_buffer_;
-    if (display_buffer) RenderDisplayBuffer(display_buffer, current_channel().scaling().multiplier);
+    DrawGrid();
+    RenderDisplayBuffer();
     RenderScopeUI();
   }
 }
@@ -609,8 +663,7 @@ void ScopeApp::Render()  // const
 void ScopeApp::RenderScreensaver()  // const
 {
   UpdateDisplayBuffer();
-  auto display_buffer = current_display_buffer_;
-  if (display_buffer) RenderDisplayBuffer(display_buffer, current_channel().scaling().multiplier);
+  RenderDisplayBuffer();
 }
 
 void ScopeApp::EventScreensaverOff()
@@ -654,18 +707,32 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
   return px;
 }
 
-/*static*/ void ScopeApp::RenderDisplayBuffer(const int16_t *display_buffer,
-                                              const int32_t multiplier)
+/*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier)
 {
-  auto end = display_buffer + kDisplayBufferSize;
+  auto end = buffer + kDisplayBufferSize;
 
   weegfx::coord_t x = 0;
-  auto y1 = to_pixel(*display_buffer++, multiplier);
-  while (display_buffer < end) {
-    auto y2 = to_pixel(*display_buffer++, multiplier);
-    graphics.drawLine(x, y1, x + 1, y2);
+  auto y1 = to_pixel(*buffer, multiplier);
+  buffer += stride;
+  while (buffer < end) {
+    auto y2 = to_pixel(*buffer, multiplier);
+    buffer += stride;
+    graphics.drawLine(x, y1, x + stride, y2);
     y1 = y2;
-    ++x;
+    x += stride;
+  }
+}
+
+void ScopeApp::RenderDisplayBuffer() const
+{
+  auto display_buffer = current_display_buffer_;
+  if (!display_buffer) return;
+
+  if (ADC_CHANNEL_LAST != channel_config_.aux_adc_channel()) {
+    DrawWaveform(display_buffer, 2, main_channel().scaling().multiplier);
+    DrawWaveform(display_buffer + 1, 2, aux_channel().scaling().multiplier);
+  } else {
+    DrawWaveform(display_buffer, 1, main_channel().scaling().multiplier);
   }
 }
 
@@ -715,8 +782,8 @@ inline void DrawEditIcon(weegfx::coord_t x, weegfx::coord_t y, int value,
 void ScopeApp::RenderScopeUI() const
 {
   namespace DEBUG = TU::DEBUG;
-  auto &channel = current_channel();
-  auto channel_index = current_channel_index();
+  auto channel_index = selected_channel_index();
+  auto &channel = selected_channel();
 
   // Top [channel] .... [trigger]
   if (!ui_.status_bar.visible()) {
@@ -804,8 +871,7 @@ void ScopeApp::RenderScopeUI() const
 
 void ScopeApp::Activate()
 {
-  TU::ADC::StartConversionBuffered(current_channel().timebase().adc_frequency,
-                                   current_adc_channel());
+  ConfigureADC();
 }
 
 static ScopeApp scope_app_instance;
