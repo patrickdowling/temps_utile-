@@ -49,7 +49,7 @@ namespace scope {
 
 namespace menu = TU::menu;
 
-static constexpr weegfx::coord_t kDisplayBufferSize = weegfx::Graphics::kWidth;
+static constexpr weegfx::coord_t kDisplayFrameSize = weegfx::Graphics::kWidth;
 static constexpr size_t kADCChunkSize = TU::ADC::kDMAChunkSize;
 static constexpr uint32_t kTriggerLostIndicatorTimeoutTicks = TU_CORE_ISR_FREQ / 3;
 
@@ -376,14 +376,20 @@ private:
   };
 
   ChannelConfig channel_config_ = {};
-  const int16_t *current_display_buffer_ = nullptr;
-  ScopeChannel channels_[kNumChannels];
+
+  struct FrameInfo {
+    int num_channels = 1;
+    size_t read_length = 0;
+  };
 
   using CircularSampleBuffer = util::CircularSampleBuffer<int16_t, kADCChunkSize * 4>;
-  using DisplayBuffers = util::FrameBuffer<kDisplayBufferSize, 2, int16_t>;
+  using DisplayFrameBuffer = util::FrameBuffer<kDisplayFrameSize, 2, int16_t, FrameInfo>;
+
+  const DisplayFrameBuffer::Frame *current_display_frame_ = nullptr;
+  ScopeChannel channels_[kNumChannels];
 
   static CircularSampleBuffer sample_buffer_;
-  static DisplayBuffers display_buffers_;
+  static DisplayFrameBuffer display_frame_buffer_;
 
   const ScopeChannel &main_channel() const { return channels_[channel_config_.main_adc_channel()]; }
   ScopeChannel &main_channel() { return channels_[channel_config_.main_adc_channel()]; }
@@ -432,7 +438,7 @@ private:
 };
 
 /*static*/ ScopeApp::CircularSampleBuffer ScopeApp::sample_buffer_ __attribute__((aligned(4)));
-/*static*/ ScopeApp::DisplayBuffers ScopeApp::display_buffers_ __attribute__((aligned(4)));
+/*static*/ ScopeApp::DisplayFrameBuffer ScopeApp::display_frame_buffer_ __attribute__((aligned(4)));
 
 SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
@@ -449,7 +455,7 @@ void ScopeApp::Init()
   for (auto &channel : channels_) channel.Init();
   UpdateChannelConfig();
 
-  display_buffers_.Init();
+  display_frame_buffer_.Init();
   ui_.cursor.Init(SCOPE_APP_SETTING_FIRST, SCOPE_APP_SETTING_LAST - 1);
 }
 
@@ -466,7 +472,7 @@ void ScopeApp::Process()
 
     // Process input buffer; if already triggered we don't really need to find a new one yet but
     // this might handle more than just triggers eventually
-    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer);
+    auto trigger = main_channel().Process<kADCChunkSize, 1>(adc_chunk_buffer->buffer);
 
     auto sample_writer = sample_buffer_.writer();
 #if 0
@@ -476,7 +482,7 @@ void ScopeApp::Process()
     // It might also make more sense to decimate when _reading_ from the sample buffer (although this means increasing the size)
 #else
     // TODO without decimation, this step is somewhat moot
-    for (auto src = adc_chunk_buffer, end = src + kADCChunkSize; src < end; ++src)
+    for (auto src = adc_chunk_buffer->buffer, end = src + kADCChunkSize; src < end; ++src)
       *sample_writer++ = *src;
 #endif
     adc_chunks.read();
@@ -485,13 +491,13 @@ void ScopeApp::Process()
     // Trigger/display buffer handling
     size_t read_length = 0;
     if (trigger_state_.triggered) {
-      if (sample_buffer_.available() < kDisplayBufferSize) {
+      if (sample_buffer_.available() < kDisplayFrameSize) {
         // still accumulating (doesn't happen, since we got more data to get here)
       } else {
         // buffer full, rearm and start again
         trigger_state_.triggered = false;
         trigger_state_.holdoff = main_channel().trigger_holdoff();
-        read_length = kDisplayBufferSize;
+        read_length = kDisplayFrameSize;
       }
     } else {
       if (trigger_state_.holdoff) {
@@ -500,22 +506,20 @@ void ScopeApp::Process()
         if (trigger < kADCChunkSize) {
           trigger_state_.triggered = true;
           auto n = kADCChunkSize - trigger;
-          sample_buffer_.SetReadOffset(-n /* - kDisplayBufferSize / 2*/);
+          sample_buffer_.SetReadOffset(-n /* - kDisplayFrameSize / 2*/);
         } else {
           trigger_lost = kTriggerLostIndicatorTimeoutTicks;
-          sample_buffer_.SetReadOffset(-kDisplayBufferSize);
-          read_length = kDisplayBufferSize;
+          sample_buffer_.SetReadOffset(-kDisplayFrameSize);
+          read_length = kDisplayFrameSize;
         }
       }
     }
 
-    if (read_length && display_buffers_.writeable()) {
-      auto display_buffer = display_buffers_.writeable_frame();
-      sample_buffer_.Read(display_buffer, read_length);
-      // TODO What we really want here is to set the length in the display buffer
-      // if (read_length < kDisplayBufferSize)
-      //   std::fill(display_buffer + read_length, display_buffer + kDisplayBufferSize, 0);
-      display_buffers_.written();
+    if (read_length && display_frame_buffer_.writeable()) {
+      auto frame = display_frame_buffer_.writeable_frame();
+      sample_buffer_.Read(frame->buffer, read_length);
+      frame->info.read_length = read_length;
+      display_frame_buffer_.written();
     }
   }
 
@@ -763,9 +767,9 @@ void ScopeApp::EventScreensaverOff()
 
 void ScopeApp::UpdateDisplayBuffer()
 {
-  if (display_buffers_.readable()) {
-    if (current_display_buffer_) display_buffers_.read();
-    current_display_buffer_ = display_buffers_.readable_frame();
+  if (display_frame_buffer_.readable()) {
+    if (current_display_frame_) display_frame_buffer_.read();
+    current_display_frame_ = display_frame_buffer_.readable_frame();
   }
 }
 
@@ -798,7 +802,7 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
 
 /*static*/ void ScopeApp::DrawWaveform(const int16_t *buffer, int stride, int32_t multiplier)
 {
-  auto end = buffer + kDisplayBufferSize;
+  auto end = buffer + kDisplayFrameSize;
 
   weegfx::coord_t x = 0;
   auto y1 = to_pixel(*buffer, multiplier);
@@ -814,14 +818,14 @@ static inline weegfx::coord_t to_pixel(int16_t value, const int32_t multiplier)
 
 void ScopeApp::RenderDisplayBuffer() const
 {
-  auto display_buffer = current_display_buffer_;
-  if (!display_buffer) return;
+  auto frame = current_display_frame_;
+  if (!frame) return;
 
   if (ADC_CHANNEL_LAST != channel_config_.aux_adc_channel()) {
-    DrawWaveform(display_buffer, 2, main_channel().scaling().multiplier);
-    DrawWaveform(display_buffer + 1, 2, aux_channel().scaling().multiplier);
+    DrawWaveform(frame->buffer, 2, main_channel().scaling().multiplier);
+    DrawWaveform(frame->buffer + 1, 2, aux_channel().scaling().multiplier);
   } else {
-    DrawWaveform(display_buffer, 1, main_channel().scaling().multiplier);
+    DrawWaveform(frame->buffer, 1, main_channel().scaling().multiplier);
   }
 }
 

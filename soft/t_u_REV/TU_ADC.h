@@ -70,8 +70,11 @@ public:
   static constexpr size_t kDMABufferSize = kDMAChunkSize * kDMAChunkCount;
 
   // Buffered mode buffers
+  struct ChunkInfo {
+    size_t ext_trigger_offset = 0;
+  };
   static constexpr size_t kChunkBufferCount = 4;
-  using ChunkBuffers = util::FrameBuffer<kDMAChunkSize, kChunkBufferCount, int16_t>;
+  using ChunkBuffers = util::FrameBuffer<kDMAChunkSize, kChunkBufferCount, int16_t, ChunkInfo>;
 
   enum ADC_MODE { ADC_MODE_INVALID, ADC_MODE_NORMAL, ADC_MODE_BUFFERED };
 
