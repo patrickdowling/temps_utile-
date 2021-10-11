@@ -108,15 +108,27 @@ public:
     button_ignore_mask_ |= control;
   }
 
+  void set_screensaver_timeout(uint32_t seconds);
+  inline uint32_t screensaver_timeout() const { return screensaver_timeout_; }
+
+  void set_blanking_timeout(uint32_t minutes);
+  inline uint32_t blanking_timeout() const { return blanking_timeout_; }
+
+  inline bool blanking() const { return SCREENSAVER_BLANKING == screensaver_mode_; }
+
 private:
 
+  enum EScreensaverMode { SCREENSAVER_OFF, SCREENSAVER_ACTIVE, SCREENSAVER_BLANKING };
+
   uint32_t ticks_;
+  uint32_t screensaver_timeout_;
+  uint32_t blanking_timeout_;
 
   UI::Button buttons_[4];
   uint32_t button_press_time_[4];
   uint16_t button_state_;
   uint16_t button_ignore_mask_;
-  bool screensaver_;
+  EScreensaverMode screensaver_mode_;
 
   UI::Encoder<encR1, encR2> encoder_right_;
   UI::Encoder<encL1, encL2> encoder_left_;
@@ -135,17 +147,20 @@ private:
   }
 
   bool IgnoreEvent(const UI::Event &event) {
-    bool ignore = false;
     if (button_ignore_mask_ & event.control) {
       button_ignore_mask_ &= ~event.control;
-      ignore = true;
+      return true;
     }
-    if (screensaver_) {
-      screensaver_ = false;
-      ignore = true;
+    auto screensaver_mode = screensaver_mode_;
+    if (screensaver_mode) {
+      if (TU::CONTROL_BUTTON_UP == event.control && SCREENSAVER_BLANKING != screensaver_mode)
+        screensaver_mode = SCREENSAVER_BLANKING;
+      else
+        screensaver_mode = SCREENSAVER_OFF;
+      screensaver_mode_ = screensaver_mode;
+      return true;
     }
-
-    return ignore;
+    return false;
   }
 
 };

@@ -21,6 +21,8 @@ Ui ui;
 
 void Ui::Init() {
   ticks_ = 0;
+  screensaver_timeout_ = SCREENSAVER_TIMEOUT_SECONDS * 1000U;
+  blanking_timeout_ = 0;
 
   static const int button_pins[] = { but_top, but_bot, butL, butR };
   for (size_t i = 0; i < CONTROL_BUTTON_LAST; ++i) {
@@ -29,7 +31,7 @@ void Ui::Init() {
   std::fill(button_press_time_, button_press_time_ + 4, 0);
   button_state_ = 0;
   button_ignore_mask_ = 0;
-  screensaver_ = false;
+  screensaver_mode_ = SCREENSAVER_OFF;
   encoder_right_.Init(TU_GPIO_ENC_PINMODE);
   encoder_left_.Init(TU_GPIO_ENC_PINMODE);
   event_queue_.Init();
@@ -41,6 +43,23 @@ void Ui::configure_encoders(EncoderConfig encoder_config) {
   encoder_right_.reverse(encoder_config & ENCODER_CONFIG_R_REVERSED);
   encoder_left_.reverse(encoder_config & ENCODER_CONFIG_L_REVERSED);
  }
+
+void Ui::set_screensaver_timeout(uint32_t seconds)
+{
+  uint32_t timeout = seconds * 1000U;
+  if (timeout < kLongPressTicks * 2)
+    timeout = kLongPressTicks * 2;
+
+  screensaver_timeout_ = timeout;
+  SERIAL_PRINTLN("Set screensaver timeout to %lu", timeout);
+  event_queue_.Poke();
+}
+
+void Ui::set_blanking_timeout(uint32_t minutes)
+{
+  blanking_timeout_ = minutes * 60U * 1000U;
+  SERIAL_PRINTLN("Set blanking timeout to %lu", blanking_timeout_);
+}
 
 void FASTRUN Ui::Poll() {
 
@@ -105,13 +124,26 @@ UiMode Ui::DispatchEvents(const App *app) {
     MENU_REDRAW = 1;
   }
 
-  if (idle_time() > SCREENSAVER_TIMEOUT_MS) {
-    if (!screensaver_)
-      screensaver_ = true;
-    return UI_MODE_SCREENSAVER;
-  } else {
-    return UI_MODE_MENU;
+  auto screensaver_mode = screensaver_mode_;
+  switch (screensaver_mode) {
+    case SCREENSAVER_OFF:
+    case SCREENSAVER_ACTIVE: {
+      if (idle_time() > screensaver_timeout())
+        screensaver_mode = SCREENSAVER_ACTIVE;
+      if (blanking_timeout() && idle_time() > blanking_timeout())
+        screensaver_mode = SCREENSAVER_BLANKING;
+      } break;
+    case SCREENSAVER_BLANKING: break;
   }
+  if (screensaver_mode != screensaver_mode_) {
+    SetButtonIgnoreMask();
+    screensaver_mode_ = screensaver_mode;
+  }
+
+  if (screensaver_mode_)
+    return UI_MODE_SCREENSAVER;
+  else
+    return UI_MODE_MENU;
 }
 
 UiMode Ui::Splashscreen(bool &reset_settings) {

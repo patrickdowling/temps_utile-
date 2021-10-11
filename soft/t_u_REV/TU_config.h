@@ -18,7 +18,8 @@ static constexpr int TU_GPIO_ISR_PRIO   = 112; // higher
 static constexpr int TU_UI_TIMER_PRIO   = 128; // default
 
 static constexpr unsigned long REDRAW_TIMEOUT_MS = 1;
-static constexpr unsigned long SCREENSAVER_TIMEOUT_MS = 25000; // time out menu (in ms)
+static constexpr uint32_t SCREENSAVER_TIMEOUT_SECONDS = 25; // time out menu (in s)
+static constexpr uint32_t BLANKING_TIMEOUT_MINUTES = 10; // time out to blank screen (in s)
 
 #define OCTAVES 12      // # octaves
 #define SEMITONES (OCTAVES * 12)

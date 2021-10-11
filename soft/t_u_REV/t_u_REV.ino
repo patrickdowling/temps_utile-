@@ -147,6 +147,9 @@ void setup() {
     TU::ui.Calibrate();
     ui_mode = TU::UI_MODE_MENU;
   }
+  TU::ui.set_screensaver_timeout(SCREENSAVER_TIMEOUT_SECONDS);
+  TU::ui.set_blanking_timeout(BLANKING_TIMEOUT_MINUTES);
+
   // set approx. v/oct value (from calibration data)
   TU::OUTPUTS::set_v_oct();
   // initialize apps
@@ -177,7 +180,8 @@ void FASTRUN loop() {
           TU::app_switcher.current_app()->DrawMenu();
           ++menu_redraws;
         } else {
-          TU::app_switcher.current_app()->DrawScreensaver();
+          if (!TU::ui.blanking())
+            TU::app_switcher.current_app()->DrawScreensaver();
         }
         MENU_REDRAW = 0;
         LAST_REDRAW_TIME = millis();
