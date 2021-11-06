@@ -33,7 +33,7 @@ CalibrationData calibration_data;
 };
 
 static constexpr unsigned kCalibrationAdcSmoothing = 4;
-
+static bool calibration_data_loaded = false;
 
 const TU::CalibrationData kCalibrationDefaults = {
   // DAC
@@ -55,7 +55,8 @@ const TU::CalibrationData kCalibrationDefaults = {
   // display_offset
   SH1106_128x64_Driver::kDefaultOffset,
   TU_CALIBRATION_DEFAULT_FLAGS,
-  0, 0 // reserved
+  0, // timeouts
+  0 // reserved
 };
 
 void calibration_reset() {
@@ -80,7 +81,11 @@ void calibration_load() {
 #endif
   } else {
     SERIAL_PRINTLN("Calibration data loaded...");
+    calibration_data_loaded = true;
   }
+
+  if (!TU::calibration_data.screensaver_timeout())
+    TU::calibration_data.set_screensaver_timeout(SCREENSAVER_TIMEOUT_SECONDS);
 }
 
 void calibration_save() {
@@ -93,6 +98,8 @@ enum CALIBRATION_STEP {
   CENTER_DISPLAY,
   DAC_4VM, DAC_2VM, DAC_ZERO, DAC_2V, DAC_4V,
   CV_OFFSET_0, CV_OFFSET_1, CV_OFFSET_2, CV_OFFSET_3,
+  SCREENSAVER_TIMEOUT,
+  BLANKING_TIMEOUT,
   CALIBRATION_EXIT,
   CALIBRATION_STEP_LAST,
   CALIBRATION_STEP_FINAL
@@ -102,6 +109,8 @@ enum CALIBRATION_TYPE {
   CALIBRATE_NONE,
   CALIBRATE_DAC_OUTPUT,
   CALIBRATE_ADC_OFFSET,
+  CALIBRATE_SCREENSAVER_TIMEOUT,
+  CALIBRATE_BLANKING_TIMEOUT,
   CALIBRATE_DISPLAY
 };
 
@@ -124,6 +133,7 @@ struct CalibrationState {
   CALIBRATION_STEP step;
   const CalibrationStep *current_step;
   int encoder_value;
+  bool used_defaults;
 
   SmoothedValue<uint32_t, kCalibrationAdcSmoothing> adc_sum;
 };
@@ -170,6 +180,8 @@ const CalibrationStep calibration_steps[CALIBRATION_STEP_LAST] = {
   { CV_OFFSET_1, "ADC CV2", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_2, nullptr, 0, 4095 },
   { CV_OFFSET_2, "ADC CV3", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_3, nullptr, 0, 4095 },
   { CV_OFFSET_3, "ADC CV4", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_4, nullptr, 0, 4095 },
+  { SCREENSAVER_TIMEOUT, "Screensaver", "Timeout (s)", default_help_r, default_footer, CALIBRATE_SCREENSAVER_TIMEOUT, 0, nullptr, SCREENSAVER_TIMEOUT_SECONDS, 120 },
+  { BLANKING_TIMEOUT   , "Blanking", "Timeout (min)", default_help_r, default_footer, CALIBRATE_BLANKING_TIMEOUT, 0, nullptr, 0, 60 },
   { CALIBRATION_EXIT, "Calibration complete", "Save values? ", select_help, end_footer, CALIBRATE_NONE, 0, TU::Strings::no_yes, 0, 1 }
 };
 
@@ -182,7 +194,8 @@ void TU::Ui::Calibrate() {
   CalibrationState calibration_state = {
     HELLO,
     &calibration_steps[HELLO],
-    1,
+    calibration_data_loaded ? 0 : 1,
+    false,
   };
   calibration_state.adc_sum.set(_ADC_OFFSET);
 
@@ -250,6 +263,7 @@ void TU::Ui::Calibrate() {
           if (calibration_state.encoder_value) {
             SERIAL_PRINTLN("Resetting to defaults...");
             calibration_reset();
+            calibration_state.used_defaults = true;
           }
           break;
         
@@ -267,13 +281,24 @@ void TU::Ui::Calibrate() {
       case CALIBRATE_DISPLAY:
         calibration_state.encoder_value = TU::calibration_data.display_offset;
         break;
+      case CALIBRATE_SCREENSAVER_TIMEOUT:
+        calibration_state.encoder_value = TU::calibration_data.screensaver_timeout();
+        break;
+      case CALIBRATE_BLANKING_TIMEOUT:
+        calibration_state.encoder_value = TU::calibration_data.blanking_timeout();
+        break;
 
       case CALIBRATE_NONE:
       default:
-        if (CALIBRATION_EXIT != next_step->step)
+        if (CALIBRATION_EXIT != next_step->step) {
           calibration_state.encoder_value = 0;
-        else
+        } else {
+          // Default to "not overwrite" if we loaded data and used defaults
+          if (calibration_state.used_defaults && calibration_data_loaded)
+            calibration_state.encoder_value = 0;
+          else
           calibration_state.encoder_value = 1;
+        }
       }
       calibration_state.current_step = next_step;
     }
@@ -303,7 +328,6 @@ void calibration_draw(const CalibrationState &state) {
 
   graphics.setPrintPos(menu::kIndentDx, y + 2);
   switch (step->calibration_type) {
-    
     case CALIBRATE_DAC_OUTPUT:
       graphics.print(step->message);
       graphics.setPrintPos(kValueX, y + 2);
@@ -325,13 +349,40 @@ void calibration_draw(const CalibrationState &state) {
       menu::DrawEditIcon(kValueX, y, state.encoder_value, step->min, step->max);
       graphics.drawFrame(0, 0, 128, 64);
       break;
-      
-    case CALIBRATE_NONE:
-    default:
-      graphics.setPrintPos(menu::kIndentDx, y + 2);
+
+    case CALIBRATE_SCREENSAVER_TIMEOUT:
+    case CALIBRATE_BLANKING_TIMEOUT:
       graphics.print(step->message);
-      if (step->value_str)
-        graphics.print(step->value_str[state.encoder_value]);
+      graphics.setPrintPos(kValueX, y + 2);
+      if (!state.encoder_value)
+        graphics.print("  off");
+      else
+        graphics.print((int)state.encoder_value, 5);
+      menu::DrawEditIcon(kValueX, y, state.encoder_value, step->min, step->max);
+      break;
+
+case CALIBRATE_NONE:
+    default:
+      if (CALIBRATION_EXIT != step->step) {
+        graphics.setPrintPos(menu::kIndentDx, y + 2);
+        graphics.print(step->message);
+        if (step->value_str)
+          graphics.print(step->value_str[state.encoder_value]);
+      } else {
+        graphics.setPrintPos(menu::kIndentDx, y + 2);
+        if (calibration_data_loaded && state.used_defaults)
+          graphics.print("Overwrite? ");
+        else
+          graphics.print("Save? ");
+        if (step->value_str)
+          graphics.print(step->value_str[state.encoder_value]);
+
+        if (state.used_defaults && calibration_data_loaded) {
+          y += menu::kMenuLineH;
+          graphics.setPrintPos(menu::kIndentDx, y + 2);
+          graphics.print("NB replaces existing!");
+        }
+      }
       break;
   }
 
@@ -379,6 +430,12 @@ void calibration_update(CalibrationState &state) {
     case CALIBRATE_DISPLAY:
       TU::calibration_data.display_offset = state.encoder_value;
       display::AdjustOffset(TU::calibration_data.display_offset);
+      break;
+    case CALIBRATE_SCREENSAVER_TIMEOUT:
+      TU::calibration_data.set_screensaver_timeout(state.encoder_value);
+      break;
+    case CALIBRATE_BLANKING_TIMEOUT:
+      TU::calibration_data.set_blanking_timeout(state.encoder_value);
       break;
   }
 }

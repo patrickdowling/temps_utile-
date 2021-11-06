@@ -147,8 +147,13 @@ void setup() {
     TU::ui.Calibrate();
     ui_mode = TU::UI_MODE_MENU;
   }
-  TU::ui.set_screensaver_timeout(SCREENSAVER_TIMEOUT_SECONDS);
-  TU::ui.set_blanking_timeout(BLANKING_TIMEOUT_MINUTES);
+
+  // The calibration might contain 0 from earlier versions; in this case use the old default setting.
+  auto timeout = TU::calibration_data.screensaver_timeout();
+  if (!timeout) timeout = SCREENSAVER_TIMEOUT_SECONDS;
+  TU::ui.set_screensaver_timeout(timeout);
+  // There was no real default for blanking
+  TU::ui.set_blanking_timeout(TU::calibration_data.blanking_timeout());
 
   // set approx. v/oct value (from calibration data)
   TU::OUTPUTS::set_v_oct();
