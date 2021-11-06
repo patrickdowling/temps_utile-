@@ -180,8 +180,10 @@ const CalibrationStep calibration_steps[CALIBRATION_STEP_LAST] = {
   { CV_OFFSET_1, "ADC CV2", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_2, nullptr, 0, 4095 },
   { CV_OFFSET_2, "ADC CV3", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_3, nullptr, 0, 4095 },
   { CV_OFFSET_3, "ADC CV4", "--> 0V", default_help_r, default_footer, CALIBRATE_ADC_OFFSET, ADC_CHANNEL_4, nullptr, 0, 4095 },
-  { SCREENSAVER_TIMEOUT, "Screensaver", "Timeout (s)", default_help_r, default_footer, CALIBRATE_SCREENSAVER_TIMEOUT, 0, nullptr, SCREENSAVER_TIMEOUT_SECONDS, 120 },
-  { BLANKING_TIMEOUT   , "Blanking", "Timeout (min)", default_help_r, default_footer, CALIBRATE_BLANKING_TIMEOUT, 0, nullptr, 0, 60 },
+  { SCREENSAVER_TIMEOUT, "Screensaver", "Timeout (s)", default_help_r, default_footer, CALIBRATE_SCREENSAVER_TIMEOUT, 0, nullptr, SCREENSAVER_TIMEOUT_MIN,
+  SCREENSAVER_TIMEOUT_MAX },
+  { BLANKING_TIMEOUT   , "Blanking", "Timeout (min)", default_help_r, default_footer, CALIBRATE_BLANKING_TIMEOUT, 0, nullptr, BLANKING_TIMEOUT_MIN,
+  BLANKING_TIMEOUT_MAX },
   { CALIBRATION_EXIT, "Calibration complete", "Save values? ", select_help, end_footer, CALIBRATE_NONE, 0, TU::Strings::no_yes, 0, 1 }
 };
 

@@ -55,6 +55,8 @@ struct CalibrationData {
     timeouts = ((blanking & 0xffff) << 16) | (screensaver & 0xffff);
   }
 };
+// NOTE: This really should be packed at some point
+static_assert(sizeof(CalibrationData) == 36, "sizeof(CalibrationData) changed");
 
 typedef PageStorage<EEPROMStorage, EEPROM_CALIBRATIONDATA_START, EEPROM_CALIBRATIONDATA_END,
                     CalibrationData>
