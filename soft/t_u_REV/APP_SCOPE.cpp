@@ -1055,7 +1055,8 @@ void ScopeApp::RenderScopeUI() const
   if (TriggerProcessor::TRIGGER_TYPE_NONE != trigger_type) {
     auto y = trigger_level_y;
     CONSTRAIN(y, 0, 58);
-    graphics.writeBitmap8(0, y, 3, icons::trigger_level_3x8);
+    graphics.clearRect(0, y, 3, 8);
+    graphics.drawBitmap8(0, y, 3, icons::trigger_level_3x8);
   }
 
   // TOP ... [freq][trigger]
