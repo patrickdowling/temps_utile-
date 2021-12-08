@@ -64,6 +64,8 @@ static constexpr weegfx::coord_t kScreenCenterY = kScreenHeight / 2;
 
 static constexpr weegfx::coord_t kStatusBarY = 64 - weegfx::kFixedFontH;
 
+static constexpr int kMaxGraticuleDensity = 5;
+
 static constexpr int kRangeVolts = 5;
 static constexpr int kTriggerLevelStepsPerV = 10;
 static constexpr int kTriggerLevelIncrement =
@@ -373,6 +375,7 @@ enum ScopeAppSetting {
   SCOPE_APP_SETTING_CHANNEL,
   SCOPE_APP_SETTING_FREQ_COUNTER,
   SCOPE_APP_SETTING_STATS_OVERLAY,
+  SCOPE_APP_SETTING_GRATICULE,
   SCOPE_APP_SETTING_LINK12,
   SCOPE_APP_SETTING_LINK34,
   SCOPE_APP_SETTING_RESET,
@@ -399,6 +402,7 @@ public:
 
   bool display_frequency_counter() const { return get_value(SCOPE_APP_SETTING_FREQ_COUNTER); }
   int display_stats_overlay() const { return get_value(SCOPE_APP_SETTING_STATS_OVERLAY); }
+  int graticule_density() const { return get_value(SCOPE_APP_SETTING_GRATICULE); }
 
 private:
   struct {
@@ -480,7 +484,7 @@ private:
   void ConfigureADC();
   void ConfigureTR();
 
-  static void DrawGraticule();
+  static void DrawGraticule(int density);
   static void DrawWaveform(const int16_t *buffer, size_t length, size_t stride, int32_t multiplier,
                            const weegfx::coord_t y);
   void RenderDisplayBuffer() const;
@@ -522,11 +526,17 @@ private:
 
 static const char *const stats_overlay_strings[] = {"off", "proc", "draw"};
 
+static const char *const graticule_density_strings[kMaxGraticuleDensity] = {
+    "off", "25%", "50%", "75%", "max",
+};
+
 SETTINGS_DECLARE(scope::ScopeApp, scope::SCOPE_APP_SETTING_LAST){
     // default, min, max, name, value_names, storage_type, parent_index, parent_value
     {0, 0, scope::ScopeApp::kNumChannels - 1, "CHANNEL", nullptr, settings::STORAGE_TYPE_U8},
     {1, 0, 1, "Disp freq", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 2, "Disp stats", scope::stats_overlay_strings, settings::STORAGE_TYPE_U4},
+    {scope::kMaxGraticuleDensity - 1, 0, scope::kMaxGraticuleDensity - 1, "Graticule",
+     scope::graticule_density_strings, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 1+2", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 1, "Link 3+4", TU::Strings::no_yes, settings::STORAGE_TYPE_U4},
     {0, 0, 0, "Reset", nullptr, settings::STORAGE_TYPE_NOP}};
@@ -838,22 +848,38 @@ void ScopeApp::ConfigureTR()
     TU::DigitalInputs::EnableDMARequest(TU::DIGITAL_INPUT_2);
 }
 
-/*static*/ void ScopeApp::DrawGraticule()
+/*static*/ void ScopeApp::DrawGraticule(int density)
 {
-  static constexpr uint8_t kVLinePattern = 0x11;
-  static constexpr uint8_t kHlinePattern = 4;
+  static constexpr struct {
+    uint8_t xaxis;
+    uint8_t yaxis;
+    uint8_t subdivision_x;
+    uint8_t subdivision_y;
+  } kGraticuleParameters[kMaxGraticuleDensity] = {
+      {0, 0, 0, 0}, {8, 0x01, 0, 0}, {8, 0x01, 16, 0}, {4, 0x11, 8, 0x1}, {2, 0x55, 4, 0x11},
+  };
 
-  graphics.drawVLinePattern(16, 0, 64, kVLinePattern);
-  graphics.drawVLinePattern(32, 0, 64, kVLinePattern);
-  graphics.drawVLinePattern(48, 0, 64, kVLinePattern);
-  graphics.drawVLinePattern(64, 0, 64, 0x55);
-  graphics.drawVLinePattern(80, 0, 64, kVLinePattern);
-  graphics.drawVLinePattern(96, 0, 64, kVLinePattern);
-  graphics.drawVLinePattern(112, 0, 64, kVLinePattern);
+  if (density) {
+    auto params = kGraticuleParameters[density];
 
-  graphics.drawHLinePattern(0, 16, 128, kHlinePattern);
-  graphics.drawHLinePattern(0, 32, 128, 2);
-  graphics.drawHLinePattern(0, 48, 128, kHlinePattern);
+    graphics.drawHLinePattern(0, 32, 128, params.xaxis);
+    graphics.drawVLinePattern(64, 0, 64, params.yaxis);
+
+    if (density > 1) {
+      graphics.drawHLinePattern(0, 16, 128, params.subdivision_x);
+      graphics.drawHLinePattern(0, 48, 128, params.subdivision_x);
+
+      if (density > 2) {
+        graphics.drawVLinePattern(32, 0, 64, params.subdivision_y);
+        graphics.drawVLinePattern(96, 0, 64, params.subdivision_y);
+
+        graphics.drawVLinePattern(16, 0, 64, params.subdivision_y);
+        graphics.drawVLinePattern(48, 0, 64, params.subdivision_y);
+        graphics.drawVLinePattern(80, 0, 64, params.subdivision_y);
+        graphics.drawVLinePattern(112, 0, 64, params.subdivision_y);
+      }
+    }
+  }
 }
 
 void ScopeApp::Render()  // const
@@ -862,7 +888,7 @@ void ScopeApp::Render()  // const
     RenderMenu();
   } else {
     UpdateDisplayBuffer();
-    DrawGraticule();
+    DrawGraticule(graticule_density());
     RenderDisplayBuffer();
     RenderScopeUI();
   }
