@@ -4,6 +4,23 @@
 namespace TU {
 
   namespace Strings {
+    const char * const VERSION =
+#include "TU_version.h"
+      " "
+#ifdef TU_BUILD_TAG
+      TU_BUILD_TAG
+#else
+      "private"
+#endif
+      ;
+
+#ifdef MODEL_2TT
+    const char * const NAME = "Time & Triggers";
+    const char * const SHORT_NAME = "2TT";
+#else
+    const char * const NAME = "Temps Utile";
+    const char * const SHORT_NAME = "TU";
+#endif
 
   const char * const seq_playmodes[] = {" - ", "SEQ+1", "SEQ+2", "SEQ+3", "TR2+1", "TR2+2", "TR2+3", "SH-1", "SH-2", "SH-3", "SH-4"};  
 

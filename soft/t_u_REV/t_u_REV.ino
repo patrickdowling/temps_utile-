@@ -35,7 +35,7 @@
 #include "TU_digital_inputs.h"
 #include "TU_menus.h"
 #include "TU_ui.h"
-#include "TU_version.h"
+#include "TU_strings.h"
 #include "TU_options.h"
 #include "src/display.h"
 #include "src/ADC/OC_util_ADC.h"
@@ -104,12 +104,8 @@ void setup() {
   delay(50);
   NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
   TU::OUTPUTS::SPI_Init();
-#ifdef MODEL_2TT
-  SERIAL_PRINTLN("* 2TT BOOTING...");
-#else
-  SERIAL_PRINTLN("* t_u BOOTING...");
-#endif
-  SERIAL_PRINTLN("* %s", TU_VERSION);
+  SERIAL_PRINTLN("* %s BOOTING...", TU::Strings::SHORT_NAME);
+  SERIAL_PRINTLN("* %s", TU::Strings::VERSION);
   TU::DEBUG::Init();
   delay(300);
   TU::DigitalInputs::Init();

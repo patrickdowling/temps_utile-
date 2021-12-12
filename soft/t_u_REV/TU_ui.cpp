@@ -10,7 +10,6 @@
 #include "TU_menus.h"
 #include "TU_ui.h"
 #include "TU_strings.h"
-#include "TU_version.h"
 #include "src/display.h"
 
 extern uint_fast8_t MENU_REDRAW;
@@ -168,12 +167,8 @@ UiMode Ui::Splashscreen(bool &reset_settings) {
     GRAPHICS_BEGIN_FRAME(true);
 
     menu::DefaultTitleBar::Draw();
-#ifdef MODEL_2TT
-  graphics.print("Time & Triggers");
-#else
-  graphics.print("temps_utile");
-#endif
-       weegfx::coord_t y = menu::CalcLineY(0);
+    graphics.print(Strings::NAME);
+    weegfx::coord_t y = menu::CalcLineY(0);
 
     graphics.setPrintPos(menu::kIndentDx, y + menu::kTextDy);
     graphics.print("[L] => calibration");
@@ -193,7 +188,7 @@ UiMode Ui::Splashscreen(bool &reset_settings) {
 
     y += menu::kMenuLineH;
     graphics.setPrintPos(menu::kIndentDx, y + menu::kTextDy);
-    graphics.print(TU_VERSION);
+    graphics.print(Strings::VERSION);
 
     weegfx::coord_t w;
     if (now - start < SPLASHSCREEN_DELAY_MS)

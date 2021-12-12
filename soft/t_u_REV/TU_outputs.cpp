@@ -1,5 +1,5 @@
 
-#include <spififo.h>
+#include <SPIFIFO.h>
 #include "TU_outputs.h"
 #include "TU_gpio.h"
 
