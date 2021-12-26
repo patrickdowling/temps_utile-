@@ -1,6 +1,9 @@
 name: PlatformIO CI
 
-on: [push]
+on:
+  push:
+    branches:
+      - 'dev/**'
 
 jobs:
   build:
@@ -35,5 +38,5 @@ jobs:
     - name: Copy artifact
       uses: actions/upload-artifact@v2
       with:
-        name: temps_utile.hex
+        name: temps_utile-{{github.sha}}.hex
         path: soft/t_u_REV/.pio/build/tu_prod/*.hex
