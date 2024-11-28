@@ -104,6 +104,8 @@ void setup() {
   delay(50);
   NVIC_SET_PRIORITY(IRQ_PORTB, 0); // TR1 = 0 = PTB16
   TU::OUTPUTS::SPI_Init();
+  Serial.begin(9600);
+  Serial.println("");
   SERIAL_PRINTLN("* %s BOOTING...", TU::Strings::SHORT_NAME);
   SERIAL_PRINTLN("* %s", TU::Strings::VERSION);
   TU::DEBUG::Init();
